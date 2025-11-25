@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amlbot_agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "OpenAI agent for tracing simple cases"
 authors = [
     { name = "Oleg Pun", email = "oleg.pun@vareger.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "pydantic==2.11.7",
     "pydantic_core==2.33.2",

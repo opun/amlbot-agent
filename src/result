@@ -1,0 +1,70 @@
+{
+  "summary_text": "The perpetrator contacted the victim through WhatsApp under the guise of responding to a rental advertisement. They gained the victim's trust and persuaded them to use a crypto wallet app for supposed investments. On September 25, the perpetrator accessed the wallet and stole USDT funds. The Ethereum blockchain was used, with the USDT asset being transferred from the victim's address to an intermediate address. Currently, the stolen funds are at this intermediate address, with no further steps identified.",
+  "graph": {
+    "case_meta": {
+      "description": "The victim was contacted by the perpetrator via WhatsApp in response to a rental advertisement. The perpetrator gained the victim\u2019s trust and convinced them to download and use a crypto wallet application under the pretext of making profitable investments. On 25 September, the victim\u2019s funds were stolen from the wallet, indicating that the perpetrator had gained unauthorized access.",
+      "victim_address": "0xc06bc978972d579c2095498bf9a303b3ca9220e0",
+      "blockchain_name": "eth",
+      "asset_symbol": "USDT",
+      "approx_date": null
+    },
+    "nodes": [
+      {
+        "id": "0xc06bc978972d579c2095498bf9a303b3ca9220e0-eth",
+        "type": "address",
+        "address": "0xc06bc978972d579c2095498bf9a303b3ca9220e0",
+        "tx_hash": null,
+        "chain": "eth",
+        "role": "victim",
+        "labels": [
+          "Victim\u2019s wallet"
+        ],
+        "metadata": {
+          "asset": "USDT",
+          "amount_estimate": 66030000000,
+          "protocol": null
+        }
+      },
+      {
+        "id": "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth",
+        "type": "address",
+        "address": "0xc80fc2dc220f142864b53107b2fca83a0d671eda",
+        "tx_hash": null,
+        "chain": "eth",
+        "role": "intermediate",
+        "labels": [],
+        "metadata": {
+          "asset": "USDT",
+          "amount_estimate": 66030000000,
+          "protocol": null
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-path-1-0",
+        "from": "0xc06bc978972d579c2095498bf9a303b3ca9220e0-eth",
+        "to": "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth",
+        "relation": "flow",
+        "chain": "eth",
+        "asset": "USDT",
+        "amount_estimate": 66030000000,
+        "step_type": "direct_transfer"
+      }
+    ],
+    "comments": [
+      {
+        "id": "annotation-1",
+        "label": null,
+        "text": "Theft transaction identified from victim's address to an intermediate address.",
+        "related_nodes": [
+          "0xc06bc978972d579c2095498bf9a303b3ca9220e0-eth",
+          "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth"
+        ],
+        "related_edges": [
+          "edge-path-1-0"
+        ]
+      }
+    ]
+  }
+}

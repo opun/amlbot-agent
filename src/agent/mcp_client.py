@@ -65,3 +65,7 @@ Return the tool output as-is."""
     async def expert_search(self, hash: str, filter: str = "explorer") -> Dict[str, Any]:
         instruction = f'Use expert-search with hash="{hash}", filter="{filter}"'
         return await self._execute(instruction)
+
+    async def token_transfers(self, tx_hash: str, blockchain_name: str) -> Dict[str, Any]:
+        instruction = f'Use token-transfers with tx_hash="{tx_hash}", blockchain_name="{blockchain_name}"'
+        return await self._execute(instruction)

@@ -1,189 +1,175 @@
 {
-  "summary_text": "Case case-20251127-163104-dca86e: Tracing USDT on eth.\nVictim: 0xc06bc978972d579c2095498bf9a303b3ca9220e0\nApproximate Date: 2025-09-24\n\nTrace Stats:\n- Explored Paths: 1\n- Initial Amount: 66030.0\n\nFindings:\n\nPath path-1:\n  Step 0: 0xc06bc978972d579c2095498bf9a303b3ca9220e0 -> 0xc80fc2dc220f142864b53107b2fca83a0d671eda (66030.0 USDT) via direct_transfer\n    Tx: 0x2a57c4a2537a0bfab310485e21342caa1909c75352dfe0f6afdd62a9a5b284ee\n  Step 1: 0xc80fc2dc220f142864b53107b2fca83a0d671eda -> 0x0e2b112a017543edac0ebf649f2c4ea05e84e60d (66030.0 USDT) via direct_transfer\n    Tx: 0x28e11a50f6c42f718ea747b47975f46c36274564fd2467474d6d5258949baa6f\n  Step 2: 0x0e2b112a017543edac0ebf649f2c4ea05e84e60d -> 0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c (70000.0 USDT) via direct_transfer\n    Tx: 0xaee501540b3ea2e009cce203d7a7139e33a0105ff53e00b6fd35a7b1e9745175\n  Step 3: 0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c -> 0xb9a8d1731df77b7ed15234259a5c77f218eb5e82 (70000.0 USDT) via direct_transfer\n    Tx: 0x38e876e2a234450f9141e07d8f63e9a5a9260642a4905355658a791404ea553a\n  Step 4: 0xb9a8d1731df77b7ed15234259a5c77f218eb5e82 -> 0xb685760ebd368a891f27ae547391f4e2a289895b (70000.0 USDT) via bridge_in\n    Tx: 0xff0f23c37726e79bfd742462c32c9e0ef32544b83a01b71fedb34101a6256cf3\n    Service: Bridge to None\n  >> Path stopped: Funds reached Bridge/Swap/DEX service: Bridgers, Bridge\n",
+  "summary_text": "Case case-20251208-114155-1ef959: Tracing usdt on trx.\nVictim: TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe\nApproximate Date: 2025-02-20\n\nTrace Stats:\n- Explored Paths: 1\n- Initial Amount: 503300.0\n\nFindings:\n\nPath main:\n  Step 0: TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe -> TAfLbvY46bjXinPXenJovuFVidJq4AGQhW (503300.0 usdt) via direct_transfer\n    Tx: 64541a3741602a44df434caf1b5a1d3b4f2e4d92a4eda1aa352be7b0a48e2070\n  Step 1: TAfLbvY46bjXinPXenJovuFVidJq4AGQhW -> TTqHhHyBL1Tr3Zn4Gna5fDsySbweBDCBEd (484300.08 usdt) via direct_transfer\n    Tx: ae0865811670e64cfb7f38f957f6108bba1bbbeb7ca5db330fd49ae89dab079d\n  Step 2: TAfLbvY46bjXinPXenJovuFVidJq4AGQhW -> TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf (400000.0 usdt) via direct_transfer\n    Tx: 06954dd5cd672993923919901d398461d2c1520875b4f7718a33b5e89c8d1c1b\n  Step 3: TAfLbvY46bjXinPXenJovuFVidJq4AGQhW -> TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf (100000.0 usdt) via direct_transfer\n    Tx: 8379797a2f5e2a18b790eb3c719540842dc06d29a15aec3b801b15da88526e8a\n  Step 4: TAfLbvY46bjXinPXenJovuFVidJq4AGQhW -> TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC (20.0 usdt) via direct_transfer\n    Tx: e00964089de9780a92b849de48d27c0331b28c90cae1ef7d8f0efccf846eebd5\n  Step 5: TAfLbvY46bjXinPXenJovuFVidJq4AGQhW -> TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC (150000.0 usdt) via direct_transfer\n    Tx: 3d6f88b5d4a81f0b4b43148ff11d8b207ebc75259bfc50e3c678c070c4e52058\n  >> Path stopped: Max hops reached or trace completed\n",
   "graph": {
     "case_meta": {
-      "case_id": "case-20251127-163104-dca86e",
-      "trace_id": "trace_d310ad26d12342fc9ac631008062b9cb",
-      "description": "The victim was contacted by the perpetrator via WhatsApp in response to a rental advertisement. The perpetrator gained the victim\u2019s trust and convinced them to download and use a crypto wallet application under the pretext of making profitable investments. Around 24 September 2025, the victim\u2019s funds were stolen from the wallet, indicating that the perpetrator had gained unauthorized access.",
-      "victim_address": "0xc06bc978972d579c2095498bf9a303b3ca9220e0",
-      "blockchain_name": "eth",
+      "case_id": "case-20251208-114155-1ef959",
+      "trace_id": "trace_9d9b999cf182438fa2190ca3d57d1dd5",
+      "description": "",
+      "victim_address": "TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe",
+      "blockchain_name": "trx",
       "chains": [
-        "eth"
+        "trx"
       ],
-      "asset_symbol": "USDT",
-      "approx_date": "2025-09-24"
+      "asset_symbol": "usdt",
+      "approx_date": "2025-02-20"
     },
     "nodes": [
       {
-        "id": "0xc06bc978972d579c2095498bf9a303b3ca9220e0-eth",
+        "id": "TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe-trx",
         "type": "address",
-        "address": "0xc06bc978972d579c2095498bf9a303b3ca9220e0",
-        "chain": "eth",
+        "address": "TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe",
+        "chain": "trx",
         "role": "victim",
-        "labels": [
-          "Victim"
-        ],
+        "labels": [],
         "metadata": {
-          "risk_score": null,
-          "notes": "Source of funds"
+          "risk_score": 0.476,
+          "notes": ""
         }
       },
       {
-        "id": "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth",
+        "id": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
         "type": "address",
-        "address": "0xc80fc2dc220f142864b53107b2fca83a0d671eda",
-        "chain": "eth",
+        "address": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW",
+        "chain": "trx",
         "role": "perpetrator",
         "labels": [
           "Suspected Perpetrator"
         ],
         "metadata": {
-          "risk_score": 0.345,
-          "notes": "Classified as intermediate based on activity."
+          "risk_score": 0.441,
+          "notes": "This address received direct outflow from victim in the theft transaction."
         }
       },
       {
-        "id": "0x0e2b112a017543edac0ebf649f2c4ea05e84e60d-eth",
+        "id": "TTqHhHyBL1Tr3Zn4Gna5fDsySbweBDCBEd-trx",
         "type": "address",
-        "address": "0x0e2b112a017543edac0ebf649f2c4ea05e84e60d",
-        "chain": "eth",
+        "address": "TTqHhHyBL1Tr3Zn4Gna5fDsySbweBDCBEd",
+        "chain": "trx",
         "role": "intermediate",
         "labels": [],
         "metadata": {
-          "risk_score": 0.361,
-          "notes": "Classified as intermediate based on activity."
+          "risk_score": 0.428,
+          "notes": ""
         }
       },
       {
-        "id": "0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c-eth",
+        "id": "TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf-trx",
         "type": "address",
-        "address": "0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c",
-        "chain": "eth",
+        "address": "TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf",
+        "chain": "trx",
         "role": "intermediate",
         "labels": [],
         "metadata": {
-          "risk_score": 0.368,
-          "notes": "Classified as intermediate based on activity."
+          "risk_score": 0.441,
+          "notes": ""
         }
       },
       {
-        "id": "0xb9a8d1731df77b7ed15234259a5c77f218eb5e82-eth",
+        "id": "TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC-trx",
         "type": "address",
-        "address": "0xb9a8d1731df77b7ed15234259a5c77f218eb5e82",
-        "chain": "eth",
+        "address": "TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC",
+        "chain": "trx",
         "role": "intermediate",
         "labels": [],
         "metadata": {
-          "risk_score": 0.75,
-          "notes": "Classified as intermediate based on activity."
-        }
-      },
-      {
-        "id": "0xb685760ebd368a891f27ae547391f4e2a289895b-eth",
-        "type": "address",
-        "address": "0xb685760ebd368a891f27ae547391f4e2a289895b",
-        "chain": "eth",
-        "role": "bridge_service",
-        "labels": [
-          "Bridgers",
-          "Bridge"
-        ],
-        "metadata": {
-          "risk_score": 0.25,
-          "notes": "Identified as Bridge/Swap/DEX service: Bridgers (Bridge)"
+          "risk_score": 0.364,
+          "notes": ""
         }
       }
     ],
     "edges": [
       {
-        "id": "edge-path-1-0",
-        "from": "0xc06bc978972d579c2095498bf9a303b3ca9220e0-eth",
-        "to": "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth",
-        "tx_hash": "0x2a57c4a2537a0bfab310485e21342caa1909c75352dfe0f6afdd62a9a5b284ee",
+        "id": "edge-main-0",
+        "from": "TD8qhmWmE6xJqZRU2xanbeYGuNJSVHGENe-trx",
+        "to": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "tx_hash": "64541a3741602a44df434caf1b5a1d3b4f2e4d92a4eda1aa352be7b0a48e2070",
         "relation": "flow",
-        "chain": "eth",
-        "asset": "USDT",
-        "amount_estimate": 66030.0,
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 503300.0,
         "step_type": "direct_transfer"
       },
       {
-        "id": "edge-path-1-1",
-        "from": "0xc80fc2dc220f142864b53107b2fca83a0d671eda-eth",
-        "to": "0x0e2b112a017543edac0ebf649f2c4ea05e84e60d-eth",
-        "tx_hash": "0x28e11a50f6c42f718ea747b47975f46c36274564fd2467474d6d5258949baa6f",
+        "id": "edge-main-1",
+        "from": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "to": "TTqHhHyBL1Tr3Zn4Gna5fDsySbweBDCBEd-trx",
+        "tx_hash": "ae0865811670e64cfb7f38f957f6108bba1bbbeb7ca5db330fd49ae89dab079d",
         "relation": "flow",
-        "chain": "eth",
-        "asset": "USDT",
-        "amount_estimate": 66030.0,
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 484300.08,
         "step_type": "direct_transfer"
       },
       {
-        "id": "edge-path-1-2",
-        "from": "0x0e2b112a017543edac0ebf649f2c4ea05e84e60d-eth",
-        "to": "0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c-eth",
-        "tx_hash": "0xaee501540b3ea2e009cce203d7a7139e33a0105ff53e00b6fd35a7b1e9745175",
+        "id": "edge-main-2",
+        "from": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "to": "TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf-trx",
+        "tx_hash": "06954dd5cd672993923919901d398461d2c1520875b4f7718a33b5e89c8d1c1b",
         "relation": "flow",
-        "chain": "eth",
-        "asset": "USDT",
-        "amount_estimate": 70000.0,
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 400000.0,
         "step_type": "direct_transfer"
       },
       {
-        "id": "edge-path-1-3",
-        "from": "0x6c2bf4df8f11325bf8c01beadae6403cd7f44e1c-eth",
-        "to": "0xb9a8d1731df77b7ed15234259a5c77f218eb5e82-eth",
-        "tx_hash": "0x38e876e2a234450f9141e07d8f63e9a5a9260642a4905355658a791404ea553a",
+        "id": "edge-main-3",
+        "from": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "to": "TCqwJBA63q87SsvFu6oCNu7xUDv9rMxgvf-trx",
+        "tx_hash": "8379797a2f5e2a18b790eb3c719540842dc06d29a15aec3b801b15da88526e8a",
         "relation": "flow",
-        "chain": "eth",
-        "asset": "USDT",
-        "amount_estimate": 70000.0,
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 100000.0,
         "step_type": "direct_transfer"
       },
       {
-        "id": "edge-path-1-4",
-        "from": "0xb9a8d1731df77b7ed15234259a5c77f218eb5e82-eth",
-        "to": "0xb685760ebd368a891f27ae547391f4e2a289895b-eth",
-        "tx_hash": "0xff0f23c37726e79bfd742462c32c9e0ef32544b83a01b71fedb34101a6256cf3",
+        "id": "edge-main-4",
+        "from": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "to": "TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC-trx",
+        "tx_hash": "e00964089de9780a92b849de48d27c0331b28c90cae1ef7d8f0efccf846eebd5",
         "relation": "flow",
-        "chain": "eth",
-        "asset": "USDT",
-        "amount_estimate": 70000.0,
-        "step_type": "bridge_in"
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 20.0,
+        "step_type": "direct_transfer"
+      },
+      {
+        "id": "edge-main-5",
+        "from": "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW-trx",
+        "to": "TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC-trx",
+        "tx_hash": "3d6f88b5d4a81f0b4b43148ff11d8b207ebc75259bfc50e3c678c070c4e52058",
+        "relation": "flow",
+        "chain": "trx",
+        "asset": "usdt",
+        "amount_estimate": 150000.0,
+        "step_type": "direct_transfer"
       }
     ],
     "paths": [
       {
-        "path_id": "path-1",
-        "description": "Main flow",
-        "total_steps": 5,
-        "last_step_index": 4,
-        "last_address": "0xb685760ebd368a891f27ae547391f4e2a289895b",
-        "stop_reason": "Funds reached Bridge/Swap/DEX service: Bridgers, Bridge"
+        "path_id": "main",
+        "description": "Primary trace path from victim address outflow through intermediary addresses after theft event.",
+        "total_steps": 6,
+        "last_step_index": 5,
+        "last_address": "TP52p5QXwKUKdo5iQ2jYZz5ni1eBVjypoC",
+        "stop_reason": "Max hops reached or trace completed"
       }
     ],
     "comments": [
       {
-        "id": "victim-theft",
-        "label": "Theft",
+        "id": "pattern1",
+        "label": "Rapid Fund Splitting",
         "related_addresses": [
-          "0xc06bc978972d579c2095498bf9a303b3ca9220e0",
-          "0xc80fc2dc220f142864b53107b2fca83a0d671eda"
+          "TAfLbvY46bjXinPXenJovuFVidJq4AGQhW"
         ],
         "related_steps": [
-          "path-1:0"
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
         ],
-        "text": "Funds (66030.0 USDT) moved to 0xc80fc2dc220f142864b53107b2fca83a0d671eda."
-      },
-      {
-        "id": "term-a210",
-        "label": "Endpoint",
-        "related_addresses": [
-          "0xb685760ebd368a891f27ae547391f4e2a289895b"
-        ],
-        "related_steps": [
-          "path-1:4"
-        ],
-        "text": "Funds reached Bridge/Swap/DEX service: Bridgers, Bridge"
+        "text": "The suspected perpetrator address rapidly splits the stolen funds to several separate addresses within a short period, a common laundering tactic to evade tracking."
       }
     ]
   }

@@ -27,8 +27,7 @@ async def run_trace(
     date: Optional[str] = None,
     tx_hashes: Optional[str] = None,
     tx_hash: Optional[str] = None,
-    theft_asset: Optional[str] = None,
-    threshold: float = 0.10
+    theft_asset: Optional[str] = None
 ):
     if victim_address and tx_hash:
         print(f"Starting trace for transaction {tx_hash} (victim: {victim_address}) on {blockchain}...")
@@ -74,7 +73,6 @@ async def run_trace(
             final_date = date or parsed_info.get("approx_date")
             final_tx_hash = tx_hash or parsed_info.get("tx_hash")
             final_theft_asset = theft_asset or parsed_info.get("theft_asset")
-            final_threshold = threshold if threshold != 0.10 else (parsed_info.get("threshold", 0.10))
 
             # Handle known_tx_hashes
             known_hashes = []
@@ -94,8 +92,7 @@ async def run_trace(
                 approx_date=final_date,
                 known_tx_hashes=known_hashes,
                 tx_hash=final_tx_hash,
-                theft_asset=final_theft_asset,
-                min_amount_ratio=final_threshold
+                theft_asset=final_theft_asset
             )
 
             print("Running tracer...")
@@ -170,16 +167,6 @@ def main():
                     get_input("Approximate Date (YYYY-MM-DD)", "approx_date")
                     get_input("Trace Mode (address/transaction)", "trace_mode")
 
-                    # Handle threshold specially (float/int)
-                    current_thresh = parsed_info.get("threshold")
-                    thresh_display = f"{current_thresh*100:.0f}" if current_thresh is not None else ""
-                    thresh_val = input(f"Threshold % [{thresh_display}]: ").strip()
-                    if thresh_val:
-                        try:
-                            parsed_info["threshold"] = float(thresh_val) / 100.0
-                        except ValueError:
-                            print("Invalid threshold, keeping previous value.")
-
                     # Handle known_tx_hashes (list)
                     current_hashes = ",".join(parsed_info.get("known_tx_hashes", []))
                     hashes_val = input(f"Known Tx Hashes (comma-separated) [{current_hashes}]: ").strip()
@@ -246,19 +233,6 @@ def main():
                 tx_hash = parsed_info.get("tx_hash")
                 theft_asset = parsed_info.get("theft_asset")
 
-            # Threshold is common to both modes
-            threshold_from_parsed = parsed_info.get("threshold")
-            if threshold_from_parsed is not None:
-                threshold_input = input(f"Enter threshold % (default: {threshold_from_parsed*100:.0f}): ").strip()
-                threshold = float(threshold_input) / 100.0 if threshold_input else threshold_from_parsed
-            else:
-                threshold_input = input("Enter threshold % (default: 10): ").strip() or "10"
-                try:
-                    threshold = float(threshold_input) / 100.0  # Convert percentage to ratio
-                except ValueError:
-                    print(f"Invalid threshold, using default 10%")
-                    threshold = 0.10
-
             # Validate that either victim_address or tx_hash is provided
             if not victim and not tx_hash:
                 print("Error: Either victim address (Mode 1) or transaction hash (Mode 2) must be provided.")
@@ -275,8 +249,7 @@ def main():
                 date=date,
                 tx_hashes=tx_hashes,
                 tx_hash=tx_hash,
-                theft_asset=theft_asset,
-                threshold=threshold
+                theft_asset=theft_asset
             ))
 
         except KeyboardInterrupt:
@@ -311,16 +284,6 @@ def main():
             tx_hash = None
             theft_asset = None
 
-        # Parse threshold if provided
-        threshold = 0.10  # default
-        if "--threshold" in sys.argv:
-            threshold_idx = sys.argv.index("--threshold")
-            if threshold_idx + 1 < len(sys.argv):
-                try:
-                    threshold = float(sys.argv[threshold_idx + 1]) / 100.0
-                except ValueError:
-                    pass
-
         # Validate that either victim_address or tx_hash is provided
         if not victim and not tx_hash:
             print("Error: Either victim address (Mode 1) or transaction hash (Mode 2) must be provided.")
@@ -334,8 +297,7 @@ def main():
             date=date,
             tx_hashes=tx_hashes,
             tx_hash=tx_hash,
-            theft_asset=theft_asset,
-            threshold=threshold
+            theft_asset=theft_asset
         ))
 
 if __name__ == "__main__":

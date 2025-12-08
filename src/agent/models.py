@@ -9,9 +9,6 @@ class TracerConfig(BaseModel):
     asset_symbol: Optional[str] = None
     approx_date: Optional[str] = None
     known_tx_hashes: List[str] = Field(default_factory=list)
-    max_hops: int = 10
-    max_branches_per_hop: int = 3
-    min_amount_ratio: float = 0.10
     tx_hash: Optional[str] = None
     theft_asset: Optional[str] = None
 
@@ -64,9 +61,6 @@ class Annotation(BaseModel):
 
 class TraceStats(BaseModel):
     initial_amount_estimate: float
-    max_hops: int
-    max_branches_per_hop: int
-    min_amount_ratio: float
     explored_paths: int
     terminated_reason: Optional[str] = None
 

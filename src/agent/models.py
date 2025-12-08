@@ -34,14 +34,16 @@ class Step(BaseModel):
     amount_estimate: float
     time: Optional[Union[str, int]] # Allow int input
     direction: str
-    step_type: Literal["direct_transfer", "bridge_in", "bridge_out", "service_deposit", "internal_transfer"]
+    step_type: Literal["direct_transfer", "bridge_in", "bridge_out", "bridge_transfer", "bridge_arrival", "service_deposit", "internal_transfer"]
     service_label: Optional[str] = None
     protocol: Optional[str] = None
+    reasoning: Optional[str] = None  # Explanation for why this transaction was selected
 
 class Path(BaseModel):
     path_id: str
     description: str
     steps: List[Step]
+    stop_reason: Optional[str] = None  # Explanation for why tracing stopped on this path
 
 class Entity(BaseModel):
     address: str

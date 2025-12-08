@@ -101,19 +101,31 @@ async def run_trace(
             print("Building report...")
             report = build_report(result)
 
-            print("\n" + "="*50)
-            print("SUMMARY")
-            print("="*50)
+            # Print ASCII tree visualization
+            print("\n")
+            print(report["ascii_tree"])
+
+            print("\n" + "="*80)
+            print("DETAILED SUMMARY")
+            print("="*80)
             print(report["summary_text"])
 
-            print("\n" + "="*50)
-            print("JSON GRAPH (Saved to result.json)")
-            print("="*50)
+            print("\n" + "="*80)
+            print("RESULTS SAVED")
+            print("="*80)
 
             with open("result.json", "w") as f:
                 json.dump(report, f, indent=2)
+            print("✓ JSON report saved to: result.json")
 
-            print("Done.")
+            # Also save mermaid diagram
+            with open("trace_diagram.md", "w") as f:
+                f.write("# Trace Diagram\n\n```mermaid\n")
+                f.write(report["mermaid"])
+                f.write("\n```\n")
+            print("✓ Mermaid diagram saved to: trace_diagram.md")
+
+            print("\nDone.")
 
 def main():
     # Check if running in interactive mode (no args provided)

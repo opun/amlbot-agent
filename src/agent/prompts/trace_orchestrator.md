@@ -52,16 +52,138 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
 - If a bridge is confirmed, find matching incoming transaction on destination chain (amount within ±10% of sent amount) via all-txs on destination address.
 - Continue tracing on destination chain from the bridge destination address.
 
-### 5) Path Following
-- Only follow outgoing transactions that occur AFTER funds arrived (block_time >= previous step time). Strictly enforce this time constraint.
-- You **MUST** use the `filter` argument in `all-txs` to enforce this. Example: `filter={{"time": {{">=": 1732492800}}}}`. Use the exact block_time of the previous transaction.
-- If asset/token_id is specified, filter outgoing transactions by token_id.
-- Group outgoing transactions by destination address; accumulate amounts and prefer covering most of the traced amount rather than following every tiny transfer.
-- If funds are split into multiple significant amounts (>20% of traced amount), trace the top 3 branches in parallel. Do not trace more than 3 branches to conserve steps.
-- Sort candidate hops chronologically.
-- Avoid cycles: do not revisit addresses already present in the current path.
-- Stop when reaching terminal entities: cex_deposit, bridge_service (if bridge not traceable), otc_service, unidentified_service/mixer.
-- If no qualifying outgoing transactions, mark as dead end.
+**Cross-chain amount discrepancy handling:**
+- If the bridge output amount significantly differs from input (>20% difference), the bridge address likely aggregated funds from multiple sources.
+- In this case, add an annotation noting: "Bridge aggregation detected - output amount (X) differs from traced input (Y)"
+- Continue tracing with the OUTPUT amount from the bridge on the destination chain (not the input amount).
+
+### 5) Path Following - Chronological Accumulation Algorithm
+When tracing outgoing transactions from an address, follow this exact algorithm:
+
+**Step 1: Fetch outgoing transactions**
+- Call `all-txs` with `transaction_type="withdrawal"`, `direction="asc"`, `order="time"`.
+- You **MUST** use the `filter` argument to enforce time constraint: `filter={{"time": {{">=": INCOMING_BLOCK_TIME}}, "token_id": [TOKEN_ID]}}`.
+
+**CRITICAL: WHICH TIMESTAMP TO USE:**
+- When tracing FROM address X, use the block_time of the transaction that SENT funds TO address X.
+- Example: If tx `0xAAA` (block_time=1758796079) sent funds to `0x123`, and you now want to trace outgoing from `0x123`:
+  - Use `filter={{"time": {{">=": 1758796079}}, ...}}` ← the block_time of `0xAAA`
+- **DO NOT** use timestamps from other transactions you inspected. Use ONLY the incoming tx's block_time.
+- The token-transfers tool returns `block_time` for each transaction - use that value.
+
+**Step 2: Chronological accumulation (CRITICAL - follow exactly)**
+- The results are already sorted by block_time ascending (earliest first).
+- Initialize: `accumulated_amount = 0`, `selected_txs = []`.
+- Iterate through transactions **in the order returned** (first tx in list = earliest):
+  - Add transaction to `selected_txs`.
+  - Add transaction amount to `accumulated_amount`.
+  - Calculate `remaining_gap = (incoming_amount - accumulated_amount) / incoming_amount`.
+  - **STOP immediately** when ANY of these conditions is true:
+    1. `accumulated_amount >= incoming_amount` (fully covered)
+    2. `remaining_gap <= 0.015` (within 1.5% slippage - close enough to account for fees/slippage)
+- **DO NOT skip transactions. DO NOT select by amount similarity. Process in exact chronological order.**
+
+**SLIPPAGE THRESHOLD (1.5%):**
+- Crypto transactions often have small fees, swap slippage, or rounding differences.
+- If accumulated amount is within 1.5% of the incoming amount, stop accumulating.
+- Example: incoming=100,000, accumulated=98,600 → gap=1.4% → STOP (close enough).
+
+**EXAMPLE - FULL TRACING FLOW:**
+```
+=== STEP 0: Theft transaction ===
+Victim 0xVIC sends 66,030 USDT to 0xPERP via tx 0xTHEFT (block_time=1758758291)
+
+=== STEP 1: Trace from 0xPERP ===
+Call: all-txs(address=0xPERP, filter={{"time": {{">=": 1758758291}}, "token_id": [9]}}, ...)
+                                         ↑ Use block_time from tx 0xTHEFT
+Returns: tx 0xAAA, amount=66,030, block_time=1758796079, output=0xINTER
+Accumulated: 66,030 >= 66,030. STOP. Select [0xAAA].
+
+=== STEP 2: Trace from 0xINTER ===
+Call: all-txs(address=0xINTER, filter={{"time": {{">=": 1758796079}}, "token_id": [9]}}, ...)
+                                          ↑ Use block_time from tx 0xAAA (the INCOMING tx to 0xINTER)
+Returns:
+  1. tx 0xBBB, amount=70,000, block_time=1758796343, output=0xBRIDGE
+Accumulated: 70,000 >= 66,030. STOP. Select [0xBBB].
+
+WRONG: Using time filter 1759759127 (from some other tx you inspected)
+RIGHT: Using time filter 1758796079 (from tx 0xAAA that SENT to 0xINTER)
+```
+
+**ACCUMULATION EXAMPLE 1 (with slippage threshold):**
+```
+Incoming amount: 503,300 USDT
+all-txs returns (in chronological order):
+  1. tx_hash=AAA, amount=400,000, block_time=1000
+  2. tx_hash=BBB, amount=100,000, block_time=1001
+  3. tx_hash=CCC, amount=484,300, block_time=1002
+  4. tx_hash=DDD, amount=150,000, block_time=1003
+
+Accumulation process:
+  - Process tx AAA: accumulated=400,000, gap=(503,300-400,000)/503,300=20.5%. Continue.
+  - Process tx BBB: accumulated=500,000, gap=(503,300-500,000)/503,300=0.66%. STOP! (gap <= 1.5%)
+
+Result: selected_txs = [AAA, BBB] (stopped due to slippage threshold)
+Note: 500,000 is within 1.5% of 503,300, so we don't need tx CCC.
+```
+
+**ACCUMULATION EXAMPLE 2 (full coverage):**
+```
+Incoming amount: 100,000 USDT
+all-txs returns (in chronological order):
+  1. tx_hash=AAA, amount=50,000, block_time=1000
+  2. tx_hash=BBB, amount=60,000, block_time=1001
+
+Accumulation process:
+  - Process tx AAA: accumulated=50,000, gap=50%. Continue.
+  - Process tx BBB: accumulated=110,000, 110,000 >= 100,000. STOP! (fully covered)
+
+Result: selected_txs = [AAA, BBB]
+```
+
+WRONG: selecting [CCC] because 484,300 is closest to 503,300 - never select by amount similarity!
+
+**Step 3: Branch selection and DEPTH-FIRST tracing (CRITICAL)**
+When you have multiple selected transactions, you MUST create **SEPARATE PATH OBJECTS** in your JSON output.
+
+**CRITICAL RULE: A "Path" in the JSON output must be a single LINEAR chain (A→B→C).**
+- **NEVER** put sibling transactions (A→B, A→C) as steps in the *same* path ID.
+- **ALWAYS** create a new `path` entry for each branch.
+
+**CORRECT JSON STRUCTURE (Do this):**
+```json
+"paths": [
+  {{
+    "path_id": "1",
+    "steps": [
+      {{"step_index": 0, "from": "A", "to": "B", "amount_estimate": 100.0}}
+    ]
+  }},
+  {{
+    "path_id": "2",
+    "steps": [
+      {{"step_index": 0, "from": "A", "to": "C", "amount_estimate": 50.0}}
+    ]
+  }}
+]
+```
+
+**WRONG JSON STRUCTURE (Do NOT do this):**
+```json
+"paths": [
+  {{
+    "path_id": "1",
+    "steps": [
+      {{"step_index": 0, "from": "A", "to": "B", "amount_estimate": 100.0}},
+      {{"step_index": 1, "from": "A", "to": "C", "amount_estimate": 50.0}}  <-- WRONG! 'from' is A again. This is a sibling, not a next step.
+    ]
+  }}
+]
+```
+
+**Step 4: Continue tracing (DEPTH-FIRST)**
+- For EACH selected transaction (branch), follow it until it hits a terminal entity or dead end.
+- If you selected 3 transactions, you should output (at least) 3 distinct paths.
 
 ### 6) Pattern Detection
 - Flag and annotate:
@@ -75,7 +197,13 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
 ### 7) Output Format
 Return a JSON object matching the TraceResult structure:
 - case_meta: {{case_id, trace_id, description, victim_address, blockchain_name, chains, asset_symbol, approx_date}}
-- paths: list of paths (path_id, description, steps). steps: list of ordered steps (step_index, from, to, tx_hash, chain, asset, amount_estimate, time, direction, step_type, service_label, protocol). **IMPORTANT**: amount_estimate must be a number (float), do NOT include currency symbol (e.g. 1000.5, not "1000.5 USDT").
+- paths: list of paths (path_id, description, steps, stop_reason).
+  - steps: list of ordered steps with **reasoning** field explaining why this transaction was selected.
+  - stop_reason: explains why tracing stopped on this path (e.g., "Reached CEX deposit", "No more outgoing transactions", "Accumulated amount covered").
+  - Each step includes: step_index, from, to, tx_hash, chain, asset, amount_estimate, time, direction, step_type, service_label, protocol, reasoning.
+  - **IMPORTANT**: amount_estimate must be a number (float), do NOT include currency symbol.
+  - **IMPORTANT**: step_type must be one of: ["direct_transfer", "bridge_in", "bridge_out", "bridge_transfer", "bridge_arrival", "service_deposit", "internal_transfer"].
+  - **IMPORTANT**: reasoning should explain: "Selected as tx #N in chronological order. Accumulated: X of Y total. Selected because..."
 - entities: list of objects (address, chain, role, risk_score, riskscore_signals, labels, notes). **IMPORTANT**: role must be one of ["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "otc_service", "unidentified_service", "cluster"]. If unknown, use "intermediate" or "unidentified_service" based on context.
 - annotations: list of objects (id, label, related_addresses, related_steps, text). related_steps should be a list of strings (step IDs or indices as strings).
 - trace_stats: {{initial_amount_estimate, explored_paths, terminated_reason}}. **IMPORTANT**: initial_amount_estimate must be a number (float), do NOT include currency symbol.
@@ -97,6 +225,7 @@ JSON Schema for reference:
     {{
       "path_id": "string",
       "description": "string",
+      "stop_reason": "Reached CEX deposit address (Binance)",
       "steps": [
         {{
           "step_index": 0,
@@ -105,12 +234,28 @@ JSON Schema for reference:
           "tx_hash": "string",
           "chain": "string",
           "asset": "string",
-          "amount_estimate": 0.0,
-          "time": 0,
-          "direction": "string",
+          "amount_estimate": 400000.0,
+          "time": 1740078768,
+          "direction": "out",
           "step_type": "direct_transfer",
-          "service_label": "string",
-          "protocol": "string"
+          "service_label": null,
+          "protocol": null,
+          "reasoning": "Tx #1 chronologically. Amount: 400,000. Accumulated: 400,000 of 503,300 (gap=20.5%). Continue accumulating."
+        }},
+        {{
+          "step_index": 1,
+          "from": "string",
+          "to": "string",
+          "tx_hash": "string",
+          "chain": "string",
+          "asset": "string",
+          "amount_estimate": 100000.0,
+          "time": 1740078975,
+          "direction": "out",
+          "step_type": "direct_transfer",
+          "service_label": null,
+          "protocol": null,
+          "reasoning": "Tx #2 chronologically. Amount: 100,000. Accumulated: 500,000 of 503,300 (gap=0.66% <= 1.5% slippage). STOP - within slippage threshold."
         }}
       ]
     }}
@@ -136,9 +281,9 @@ JSON Schema for reference:
     }}
   ],
   "trace_stats": {{
-    "initial_amount_estimate": 0.0,
-    "explored_paths": 0,
-    "terminated_reason": "string"
+    "initial_amount_estimate": 503300.0,
+    "explored_paths": 1,
+    "terminated_reason": "All paths reached terminal entities or dead ends"
   }}
 }}
 ```

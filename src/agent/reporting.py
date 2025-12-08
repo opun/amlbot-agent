@@ -1,7 +1,12 @@
 from agent.models import TraceResult
 
 def _get_path_stop_reason(path, annotations) -> str:
-    """Get the stop reason for a path from annotations."""
+    """Get the stop reason for a path from annotations or path.stop_reason."""
+    # First check if stop_reason is set on the path itself
+    if hasattr(path, 'stop_reason') and path.stop_reason:
+        return path.stop_reason
+
+    # Fallback to checking annotations
     last_step_ref = f"{path.path_id}:{len(path.steps) - 1}" if path.steps else None
 
     for ann in annotations:
@@ -40,6 +45,9 @@ def build_summary_text(trace_result: TraceResult) -> str:
                 summary += f"    Tx: {step.tx_hash}\n"
             if step.service_label:
                 summary += f"    Service: {step.service_label}\n"
+            # Add reasoning if available
+            if hasattr(step, 'reasoning') and step.reasoning:
+                summary += f"    Reasoning: {step.reasoning}\n"
 
         # Add stop reason for this path
         stop_reason = _get_path_stop_reason(path, trace_result.annotations)
@@ -79,7 +87,7 @@ def build_graph(trace_result: TraceResult) -> dict:
     edges = []
     for path in trace_result.paths:
         for step in path.steps:
-            edges.append({
+            edge_data = {
                 "id": f"edge-{path.path_id}-{step.step_index}",
                 "from": f"{step.from_address}-{step.chain}",
                 "to": f"{step.to_address}-{step.chain}",
@@ -89,7 +97,11 @@ def build_graph(trace_result: TraceResult) -> dict:
                 "asset": step.asset,
                 "amount_estimate": step.amount_estimate,
                 "step_type": step.step_type
-            })
+            }
+            # Add reasoning if available
+            if hasattr(step, 'reasoning') and step.reasoning:
+                edge_data["reasoning"] = step.reasoning
+            edges.append(edge_data)
 
     # Build path summaries with stop reasons
     path_summaries = []
@@ -113,8 +125,187 @@ def build_graph(trace_result: TraceResult) -> dict:
         "comments": [a.model_dump() for a in trace_result.annotations]
     }
 
+def build_mermaid_graph(trace_result: TraceResult) -> str:
+    """
+    Generate a Mermaid flowchart diagram of the trace.
+    """
+    mermaid = ["flowchart TD"]
+
+    # Define styling
+    mermaid.append("    %% Styling")
+    mermaid.append("    classDef victim fill:#ffcccc,stroke:#ff0000,stroke-width:2px")
+    mermaid.append("    classDef perpetrator fill:#ff9999,stroke:#cc0000,stroke-width:2px")
+    mermaid.append("    classDef service fill:#ccffcc,stroke:#00cc00,stroke-width:2px")
+    mermaid.append("    classDef unknown fill:#f9f9f9,stroke:#cccccc,stroke-width:1px")
+
+    # Nodes
+    added_nodes = set()
+
+    # Define a helper to get node id
+    def get_node_id(addr):
+        return f"N{addr[:6]}"
+
+    for entity in trace_result.entities:
+        if entity.address in added_nodes:
+            continue
+
+        node_id = get_node_id(entity.address)
+        label = f"{entity.address[:6]}...{entity.address[-4:]}"
+
+        # Add risk score if high
+        if entity.risk_score and entity.risk_score > 0.7:
+            label += f"<br/>Risk: {entity.risk_score:.2f}"
+
+        # Determine class based on role
+        style_class = "unknown"
+        if entity.role == "victim":
+            style_class = "victim"
+            label += "<br/>(Victim)"
+        elif entity.role == "perpetrator":
+            style_class = "perpetrator"
+            label += "<br/>(Perpetrator)"
+        elif entity.role in ["bridge_service", "cex_deposit", "otc_service", "unidentified_service"]:
+            style_class = "service"
+            service_name = entity.labels[0] if entity.labels else entity.role
+            label += f"<br/>({service_name})"
+
+        mermaid.append(f'    {node_id}("{label}"):::{style_class}')
+        added_nodes.add(entity.address)
+
+    # Edges (Transactions)
+    for path in trace_result.paths:
+        for step in path.steps:
+            src_id = get_node_id(step.from_address)
+            dst_id = get_node_id(step.to_address)
+
+            # Ensure nodes exist (if not in entities list for some reason)
+            if step.from_address not in added_nodes:
+                mermaid.append(f'    {src_id}("{step.from_address[:6]}..."):::unknown')
+                added_nodes.add(step.from_address)
+            if step.to_address not in added_nodes:
+                mermaid.append(f'    {dst_id}("{step.to_address[:6]}..."):::unknown')
+                added_nodes.add(step.to_address)
+
+            amount_str = f"{step.amount_estimate:.2f} {step.asset}"
+            mermaid.append(f'    {src_id} -- "{amount_str}" --> {dst_id}')
+
+    return "\n".join(mermaid)
+
+def build_ascii_tree(trace_result: TraceResult) -> str:
+    """
+    Generate an ASCII tree visualization of the trace paths.
+    """
+    if not trace_result.paths:
+        return "No paths found."
+
+    # Build entity lookup for role/labels
+    entity_map = {e.address: e for e in trace_result.entities}
+
+    def format_address(addr: str) -> str:
+        """Format address with role info."""
+        short = f"{addr[:8]}...{addr[-6:]}"
+        entity = entity_map.get(addr)
+        if entity:
+            role_icons = {
+                "victim": "🔴",
+                "perpetrator": "💀",
+                "intermediate": "🔵",
+                "bridge_service": "🌉",
+                "cex_deposit": "🏦",
+                "otc_service": "💱",
+                "unidentified_service": "❓",
+                "cluster": "🔗"
+            }
+            icon = role_icons.get(entity.role, "⚪")
+            label = entity.labels[0] if entity.labels else entity.role
+            return f"{icon} {short} [{label}]"
+        return f"⚪ {short}"
+
+    def format_amount(amount: float, asset: str) -> str:
+        """Format amount with commas."""
+        if amount >= 1_000_000:
+            return f"{amount/1_000_000:.2f}M {asset}"
+        elif amount >= 1_000:
+            return f"{amount/1_000:.2f}K {asset}"
+        else:
+            return f"{amount:.2f} {asset}"
+
+    lines = []
+    lines.append("╔══════════════════════════════════════════════════════════════════════════════╗")
+    lines.append("║                              TRACE FLOW DIAGRAM                              ║")
+    lines.append("╠══════════════════════════════════════════════════════════════════════════════╣")
+
+    meta = trace_result.case_meta
+    lines.append(f"║ Case: {meta.case_id:<70} ║")
+    lines.append(f"║ Asset: {meta.asset_symbol} on {meta.blockchain_name:<62} ║")
+    lines.append(f"║ Initial Amount: {trace_result.trace_stats.initial_amount_estimate:<60} ║")
+    lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
+    lines.append("")
+
+    for path_idx, path in enumerate(trace_result.paths):
+        # Path header
+        lines.append(f"┌─ Path {path.path_id} ─────────────────────────────────────────────────────────────")
+        if path.description:
+            lines.append(f"│  {path.description[:75]}")
+        lines.append("│")
+
+        for i, step in enumerate(path.steps):
+            is_last = (i == len(path.steps) - 1)
+
+            # Source node (only for first step or when source changes)
+            if i == 0 or step.from_address != path.steps[i-1].to_address:
+                lines.append(f"│  {format_address(step.from_address)}")
+
+            # Arrow with amount
+            amount_str = format_amount(step.amount_estimate, step.asset)
+            step_type_str = step.step_type.replace("_", " ").title()
+
+            if is_last:
+                connector = "└"
+                prefix = "   "
+            else:
+                connector = "├"
+                prefix = "│  "
+
+            lines.append(f"│  │")
+            lines.append(f"│  │ ──[ {amount_str} ]── {step_type_str}")
+            if step.tx_hash:
+                lines.append(f"│  │    tx: {step.tx_hash[:20]}...{step.tx_hash[-8:]}")
+
+            # Reasoning
+            if hasattr(step, 'reasoning') and step.reasoning:
+                # Wrap reasoning to fit
+                reasoning = step.reasoning[:70] + "..." if len(step.reasoning) > 70 else step.reasoning
+                lines.append(f"│  │    💭 {reasoning}")
+
+            lines.append(f"│  ▼")
+
+            # Destination node
+            lines.append(f"│  {format_address(step.to_address)}")
+
+            if not is_last:
+                lines.append("│")
+
+        # Path stop reason
+        stop_reason = _get_path_stop_reason(path, trace_result.annotations)
+        lines.append("│")
+        lines.append(f"│  ══► STOP: {stop_reason[:65]}")
+        lines.append("└────────────────────────────────────────────────────────────────────────────")
+        lines.append("")
+
+    # Legend
+    lines.append("┌─ LEGEND ───────────────────────────────────────────────────────────────────")
+    lines.append("│  🔴 Victim    💀 Perpetrator    🔵 Intermediate    🌉 Bridge")
+    lines.append("│  🏦 CEX       💱 OTC           ❓ Unknown Service  🔗 Cluster")
+    lines.append("└────────────────────────────────────────────────────────────────────────────")
+
+    return "\n".join(lines)
+
+
 def build_report(trace_result: TraceResult) -> dict:
     return {
         "summary_text": build_summary_text(trace_result),
-        "graph": build_graph(trace_result)
+        "ascii_tree": build_ascii_tree(trace_result),
+        "graph": build_graph(trace_result),
+        "mermaid": build_mermaid_graph(trace_result)
     }

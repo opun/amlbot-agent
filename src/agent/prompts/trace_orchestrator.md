@@ -43,8 +43,21 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
   - CEX/Exchange: keywords [exchange, binance, coinbase, kraken, huobi, okx, kucoin, bitfinex, mxc, gate.io, poloniex, bybit] → role=cex_deposit, terminal=true.
   - Mixer: keyword [mixer] → role=unidentified_service, labels include "Mixer", terminal=true.
   - OTC: keyword [otc] → role=otc_service, terminal=true.
-- If risk_score > 0.75, add label "High Risk".
+- If risk_score > 0.75, add label "High Risk" but **CONTINUE TRACING** - high risk score alone is NOT a terminal condition.
 - If hop_index == 0 and no specific identity, mark role as perpetrator, add label "Suspected Perpetrator".
+
+**IMPORTANT: High Risk Address Handling**
+- A high risk score (>0.75) should be noted and flagged, but tracing should CONTINUE beyond these addresses.
+- High risk addresses are often intermediaries, not endpoints.
+- Only stop tracing when reaching a TRUE terminal entity (CEX, DEX, Bridge, Mixer, OTC) or when there are no more outgoing transactions.
+- Add an annotation when passing through a high-risk address: "Passed through high-risk address (score: X.XX) - continuing trace".
+
+**AUTOMATIC CONTINUATION POLICY:**
+- ALWAYS continue tracing automatically when the next hop is clear (single obvious outgoing transaction).
+- ALWAYS continue tracing through intermediate addresses, even with high risk scores.
+- Continue until you reach a TRUE terminal: CEX deposit, mixer, bridge endpoint, or dead end (no outgoing txs).
+- The goal is to trace as far as possible without human intervention.
+- Only report back when you've exhausted all reasonable paths or hit confirmed terminals.
 
 ### 4) Bridge Detection
 - If classified as bridge_service, verify protocol (layerzero, wormhole, multichain, allbridge, bridge, generic).

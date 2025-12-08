@@ -1,5 +1,33 @@
 from agent.models import TraceResult
 
+
+def _wrap_text(text: str, max_width: int = 70) -> list[str]:
+    """Word-wrap text to fit within max_width characters."""
+    if not text:
+        return []
+
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+
+    for word in words:
+        word_length = len(word)
+        if current_length + word_length + (1 if current_line else 0) <= max_width:
+            current_line.append(word)
+            current_length += word_length + (1 if len(current_line) > 1 else 0)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [word]
+            current_length = word_length
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return lines if lines else [text]
+
+
 def _get_path_stop_reason(path, annotations) -> str:
     """Get the stop reason for a path from annotations or path.stop_reason."""
     # First check if stop_reason is set on the path itself
@@ -246,7 +274,10 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
         # Path header
         lines.append(f"┌─ Path {path.path_id} ─────────────────────────────────────────────────────────────")
         if path.description:
-            lines.append(f"│  {path.description[:75]}")
+            # Word wrap path description
+            desc_lines = _wrap_text(path.description, max_width=75)
+            for d_line in desc_lines:
+                lines.append(f"│  {d_line}")
         lines.append("│")
 
         for i, step in enumerate(path.steps):
@@ -272,11 +303,13 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
             if step.tx_hash:
                 lines.append(f"│  │    tx: {step.tx_hash[:20]}...{step.tx_hash[-8:]}")
 
-            # Reasoning
+            # Reasoning - show full text, word-wrapped
             if hasattr(step, 'reasoning') and step.reasoning:
-                # Wrap reasoning to fit
-                reasoning = step.reasoning[:70] + "..." if len(step.reasoning) > 70 else step.reasoning
-                lines.append(f"│  │    💭 {reasoning}")
+                # Word wrap long reasoning to multiple lines
+                reasoning_lines = _wrap_text(step.reasoning, max_width=70)
+                for idx, r_line in enumerate(reasoning_lines):
+                    prefix = "💭 " if idx == 0 else "   "
+                    lines.append(f"│  │    {prefix}{r_line}")
 
             lines.append(f"│  ▼")
 
@@ -286,10 +319,13 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
             if not is_last:
                 lines.append("│")
 
-        # Path stop reason
+        # Path stop reason - show full text
         stop_reason = _get_path_stop_reason(path, trace_result.annotations)
         lines.append("│")
-        lines.append(f"│  ══► STOP: {stop_reason[:65]}")
+        stop_lines = _wrap_text(stop_reason, max_width=65)
+        for idx, s_line in enumerate(stop_lines):
+            prefix = "══► STOP: " if idx == 0 else "          "
+            lines.append(f"│  {prefix}{s_line}")
         lines.append("└────────────────────────────────────────────────────────────────────────────")
         lines.append("")
 

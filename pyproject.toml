@@ -17,7 +17,13 @@ dependencies = [
     "openai>=2.9.0",
     "click==8.2.1",
     "openai-agents>=0.6.2",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
 ]
+
+[project.scripts]
+amlbot-api = "agent.api:main"
+amlbot-cli = "agent.cli:main"
 
 [project.optional-dependencies]
 dev = [

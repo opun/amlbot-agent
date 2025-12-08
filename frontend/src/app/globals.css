@@ -94,12 +94,75 @@ body {
 /* ASCII Tree styling */
 .ascii-tree {
   font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.5;
   white-space: pre;
   overflow-x: auto;
-  background: #111;
+  background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
   padding: 16px;
   border-radius: 8px;
   color: #10b981;
+  border: 1px solid #30363d;
+}
+
+/* Table styling for markdown */
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+.prose th, .prose td {
+  padding: 8px 12px;
+  border: 1px solid #333;
+  text-align: left;
+}
+
+.prose th {
+  background: #1a1a1a;
+  font-weight: 600;
+  color: #888;
+}
+
+.prose td {
+  background: #111;
+}
+
+.prose tr:hover td {
+  background: #1a1a1a;
+}
+
+/* Details/summary styling */
+details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+details summary::-webkit-details-marker {
+  display: none;
+}
+
+details[open] summary {
+  margin-bottom: 8px;
+}
+
+/* Stats badges */
+.stat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #1a1a1a;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* Blockquote styling */
+.prose blockquote {
+  border-left: 3px solid #10b981;
+  padding-left: 1em;
+  margin: 1em 0;
+  color: #888;
+  font-style: italic;
 }

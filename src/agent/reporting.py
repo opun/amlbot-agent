@@ -157,21 +157,38 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
     """
     Generate a Mermaid flowchart diagram of the trace.
     """
+    import re
+
     mermaid = ["flowchart TD"]
 
-    # Define styling
+    # Define styling with explicit text colors for readability
     mermaid.append("    %% Styling")
-    mermaid.append("    classDef victim fill:#ffcccc,stroke:#ff0000,stroke-width:2px")
-    mermaid.append("    classDef perpetrator fill:#ff9999,stroke:#cc0000,stroke-width:2px")
-    mermaid.append("    classDef service fill:#ccffcc,stroke:#00cc00,stroke-width:2px")
-    mermaid.append("    classDef unknown fill:#f9f9f9,stroke:#cccccc,stroke-width:1px")
+    mermaid.append("    classDef victim fill:#ffcccc,stroke:#ff0000,stroke-width:2px,color:#000000,font-weight:bold")
+    mermaid.append("    classDef perpetrator fill:#ff9999,stroke:#cc0000,stroke-width:2px,color:#000000,font-weight:bold")
+    mermaid.append("    classDef service fill:#ccffcc,stroke:#00cc00,stroke-width:2px,color:#000000,font-weight:bold")
+    mermaid.append("    classDef unknown fill:#d1d5db,stroke:#4b5563,stroke-width:2px,color:#111827,font-weight:600")
 
-    # Nodes
-    added_nodes = set()
+    # Nodes - use simple counter-based IDs to avoid any special character issues
+    added_nodes = {}  # address -> node_id mapping
+    node_counter = 0
 
-    # Define a helper to get node id
+    # Define a helper to get or create a valid node id
+    # Mermaid node IDs must start with a letter and only contain alphanumeric + underscore
     def get_node_id(addr):
-        return f"N{addr[:6]}"
+        if addr in added_nodes:
+            return added_nodes[addr]
+
+        nonlocal node_counter
+        # Use simple counter-based ID to ensure it's always valid
+        node_id = f"N{node_counter}"
+        node_counter += 1
+        added_nodes[addr] = node_id
+        return node_id
+
+    # Helper to escape label text for Mermaid
+    def escape_label(text):
+        # Escape quotes and special characters
+        return text.replace('"', '&quot;').replace('\n', '<br/>')
 
     for entity in trace_result.entities:
         if entity.address in added_nodes:
@@ -195,10 +212,12 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
         elif entity.role in ["bridge_service", "cex_deposit", "otc_service", "unidentified_service"]:
             style_class = "service"
             service_name = entity.labels[0] if entity.labels else entity.role
+            # Escape service name to avoid special characters
+            service_name = escape_label(str(service_name))
             label += f"<br/>({service_name})"
 
+        label = escape_label(label)
         mermaid.append(f'    {node_id}("{label}"):::{style_class}')
-        added_nodes.add(entity.address)
 
     # Edges (Transactions)
     for path in trace_result.paths:
@@ -208,13 +227,15 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
 
             # Ensure nodes exist (if not in entities list for some reason)
             if step.from_address not in added_nodes:
-                mermaid.append(f'    {src_id}("{step.from_address[:6]}..."):::unknown')
-                added_nodes.add(step.from_address)
+                label = escape_label(f"{step.from_address[:6]}...")
+                mermaid.append(f'    {src_id}("{label}"):::unknown')
             if step.to_address not in added_nodes:
-                mermaid.append(f'    {dst_id}("{step.to_address[:6]}..."):::unknown')
-                added_nodes.add(step.to_address)
+                label = escape_label(f"{step.to_address[:6]}...")
+                mermaid.append(f'    {dst_id}("{label}"):::unknown')
 
             amount_str = f"{step.amount_estimate:.2f} {step.asset}"
+            # Escape amount string
+            amount_str = escape_label(amount_str)
             mermaid.append(f'    {src_id} -- "{amount_str}" --> {dst_id}')
 
     return "\n".join(mermaid)

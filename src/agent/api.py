@@ -127,23 +127,22 @@ def fast_parse_input(message: str) -> Dict[str, Any]:
         result["victim_address"] = btc_address.group(1)
         result["blockchain_name"] = "btc"
 
-    # Ethereum tx hash (0x + 64 hex chars)
+    # Ethereum tx hash (0x + 64 hex chars) - only set blockchain if explicitly ETH format
     eth_tx = re.search(r'\b(0x[a-fA-F0-9]{64})\b', message)
     if eth_tx:
         result["tx_hash"] = eth_tx.group(1)
-        if "blockchain_name" not in result:
+        # Only auto-set blockchain if message mentions ethereum/eth
+        if re.search(r'\b(ethereum|eth)\b', message, re.IGNORECASE):
             result["blockchain_name"] = "eth"
 
-    # Tron tx hash (64 hex chars without 0x)
-    tron_tx = re.search(r'\b([a-fA-F0-9]{64})\b', message)
-    if tron_tx and "tx_hash" not in result:
-        # Check if it's likely a Tron tx (if we already detected Tron address)
-        if result.get("blockchain_name") == "trx":
-            result["tx_hash"] = tron_tx.group(1)
-        # Or if message mentions tron/trx
-        elif re.search(r'\b(tron|trx)\b', message, re.IGNORECASE):
-            result["tx_hash"] = tron_tx.group(1)
+    # Plain 64-char hex tx hash (could be Tron or other) - DON'T auto-detect blockchain
+    plain_tx = re.search(r'\b([a-fA-F0-9]{64})\b', message)
+    if plain_tx and "tx_hash" not in result:
+        result["tx_hash"] = plain_tx.group(1)
+        # Only set blockchain if explicitly mentioned
+        if re.search(r'\b(tron|trx)\b', message, re.IGNORECASE):
             result["blockchain_name"] = "trx"
+        # Don't auto-assume blockchain for plain hashes
 
     # Detect blockchain from keywords
     if "blockchain_name" not in result:
@@ -159,10 +158,16 @@ def fast_parse_input(message: str) -> Dict[str, Any]:
             result["blockchain_name"] = "bsc"
 
     # Detect asset from keywords
+    # Don't auto-set asset if it matches the blockchain name (ambiguous - user might mean blockchain, not asset)
     asset_match = re.search(r'\b(USDT|USDC|ETH|BTC|TRX|BNB|MATIC)\b', message, re.IGNORECASE)
     if asset_match:
-        result["asset_symbol"] = asset_match.group(1).upper()
-        result["theft_asset"] = result["asset_symbol"]
+        detected_asset = asset_match.group(1).upper()
+        blockchain = result.get("blockchain_name", "").upper()
+        # Only set asset if it's different from blockchain (e.g., USDT on TRX, not TRX on TRX)
+        # This avoids ambiguity when user types "trx" meaning blockchain, not asset
+        if detected_asset != blockchain:
+            result["asset_symbol"] = detected_asset
+            result["theft_asset"] = detected_asset
 
     # Detect date patterns
     date_match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', message)
@@ -188,28 +193,21 @@ def format_collected_info(info: Dict[str, Any]) -> str:
     lines = []
 
     field_labels = {
-        "victim_address": "📍 Victim Address",
         "tx_hash": "🔗 Transaction Hash",
+        "victim_address": "📍 Victim Address",
         "blockchain_name": "⛓️ Blockchain",
-        "asset_symbol": "💰 Asset",
         "theft_asset": "💰 Stolen Asset",
+        "asset_symbol": "💰 Asset",
         "approx_date": "📅 Approximate Date",
-        "known_tx_hashes": "🔗 Additional Tx Hashes",
-        "description": "📝 Description",
     }
 
     for key, label in field_labels.items():
         value = info.get(key)
         if value:
-            if key == "known_tx_hashes" and isinstance(value, list):
-                if value:
-                    lines.append(f"- {label}: {', '.join(value)}")
-            elif key == "description":
-                # Truncate long descriptions
-                desc = value[:100] + "..." if len(value) > 100 else value
-                lines.append(f"- {label}: {desc}")
-            else:
-                lines.append(f"- {label}: `{value}`")
+            # Skip asset_symbol if theft_asset is the same
+            if key == "asset_symbol" and info.get("theft_asset") == value:
+                continue
+            lines.append(f"- {label}: `{value}`")
 
     return "\n".join(lines) if lines else "No information collected yet."
 
@@ -225,13 +223,13 @@ def get_missing_required_fields(info: Dict[str, Any]) -> List[str]:
     if not has_address and not has_tx:
         missing.append("victim_address or tx_hash")
 
-    # Blockchain is required
+    # Blockchain is ALWAYS required
     if not info.get("blockchain_name"):
         missing.append("blockchain")
 
-    # For tx_hash mode, theft_asset is recommended
-    if has_tx and not has_address and not info.get("theft_asset") and not info.get("asset_symbol"):
-        missing.append("theft_asset (recommended for transaction mode)")
+    # Stolen asset is REQUIRED when we have either tx_hash or victim_address
+    if (has_tx or has_address) and not info.get("theft_asset") and not info.get("asset_symbol"):
+        missing.append("theft_asset")
 
     return missing
 
@@ -243,17 +241,24 @@ def build_clarification_message(info: Dict[str, Any], missing: List[str]) -> str
     msg = "## 📋 Information Collected\n\n"
     msg += current + "\n\n"
 
+    # Only ask for one thing at a time
     if missing:
-        msg += "## ❓ Still Needed\n\n"
-        for field in missing:
-            if "victim_address or tx_hash" in field:
-                msg += "- **Victim wallet address** OR **Theft transaction hash**\n"
-            elif "blockchain" in field:
-                msg += "- **Blockchain** (eth, trx, btc, bsc, poly, etc.)\n"
-            elif "theft_asset" in field:
-                msg += "- **Stolen asset symbol** (e.g., USDT, ETH, BTC) - helpful for accurate tracing\n"
+        msg += "## ❓ Required Information\n\n"
 
-        msg += "\nPlease provide the missing information."
+        # Prioritize missing fields
+        field_to_ask = missing[0]
+
+        if "victim_address or tx_hash" in field_to_ask:
+            msg += "**Please provide the Transaction Hash or Victim Wallet Address.**\n"
+            msg += "\n💡 *Example: `0x1234...abcd`*"
+
+        elif "blockchain" in field_to_ask:
+            msg += "**Which blockchain network is this on?**\n"
+            msg += "- Examples: `eth`, `trx`, `btc`, `bsc`, `polygon`\n"
+
+        elif "theft_asset" in field_to_ask:
+            msg += "**What asset was stolen?**\n"
+            msg += "- Examples: `USDT`, `ETH`, `TRX`, `USDC`\n"
 
     return msg
 
@@ -276,16 +281,24 @@ def build_continuation_message(session: SessionState) -> Dict[str, Any]:
     for i, opt in enumerate(options, 1):
         addr_short = f"{opt['address'][:10]}...{opt['address'][-6:]}"
         risk_info = f" ⚠️ Risk: {opt['risk_score']:.2f}" if opt.get('risk_score') and opt['risk_score'] > 0.5 else ""
-        msg += f"**{i}.** `{addr_short}`{risk_info}\n"
-        msg += f"   - Role: {opt.get('role', 'unknown')}\n"
+
+        chain_info = f" on {opt['chain'].upper()}" if opt.get('chain') else ""
+
+        msg += f"**{i}.** `{addr_short}`{chain_info}{risk_info}\n"
+        msg += f"   - Description: {opt.get('description', '')}\n"
         msg += f"   - Last amount: {opt['last_amount']:,.2f} {opt['asset']}\n"
-        msg += f"   - Reason stopped: {opt.get('stop_reason', 'N/A')}\n\n"
+
+        if opt.get("bridge_error"):
+             msg += "   - ⚠️ Could not auto-detect bridge destination. Please provide it manually.\n"
+
+        msg += "\n"
 
     msg += "---\n\n"
     msg += "**What would you like to do?**\n"
-    msg += "- Type **'continue 1'** (or 2, 3...) to trace from that address\n"
+    msg += "- Type **'continue 1'** (or 2...) to continue tracing\n"
+    msg += "- Paste a **destination wallet address** if you know it (e.g. for bridge)\n"
     msg += "- Paste a **transaction hash** to trace from a specific tx\n"
-    msg += "- Type **'done'** to finish the trace\n"
+    msg += "- Type **'done'** to finish\n"
 
     return {
         "type": "continuation",
@@ -350,7 +363,7 @@ async def run_trace_streaming(
                 report = build_report(result)
 
                 # Extract continuation options - only when user decision is needed
-                continuation_options = extract_continuation_options(result, client, config)
+                continuation_options = await extract_continuation_options(result, client, config)
 
                 # Store trace result in session for continuation
                 if session:
@@ -384,7 +397,7 @@ async def run_trace_streaming(
                 }) + "\n"
 
 
-def extract_continuation_options(
+async def extract_continuation_options(
     result: TraceResult,
     client: MCPClient,
     config: TracerConfig
@@ -448,6 +461,28 @@ def extract_continuation_options(
                 "stop_reason": path.stop_reason or "Path ended",
                 "description": f"Continue from {last_address[:8]}...{last_address[-6:]} ({entity.role if entity else 'unknown'})"
             }
+
+            # For bridges, try to pre-analyze the destination
+            if is_bridge and last_step.tx_hash:
+                try:
+                    logger.info(f"Analyzing bridge tx: {last_step.tx_hash} on {last_step.chain}")
+                    bridge_info = await client.bridge_analyze(last_step.chain, last_step.tx_hash)
+
+                    if bridge_info and bridge_info.get("is_bridge"):
+                        dst_chain = bridge_info.get("dst_chain")
+                        dst_addr = bridge_info.get("destination_address")
+
+                        if dst_chain:
+                             option["bridge_info"] = bridge_info
+                             option["description"] = f"Continue on {dst_chain.upper()}"
+                             if dst_addr:
+                                 option["address"] = dst_addr # Update target to destination address
+                                 option["chain"] = dst_chain
+                                 option["description"] += f" (Dest: {dst_addr[:8]}...)"
+                except Exception as e:
+                    logger.warning(f"Bridge analysis failed: {e}")
+                    option["bridge_error"] = True
+
             options.append(option)
 
     return options

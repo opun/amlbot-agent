@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
 import { Send, Loader2, ExternalLink, RotateCcw, CheckCircle2, AlertCircle, Edit3, ArrowRight, StopCircle, Hash } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 interface ContinuationOption {
   address: string;
@@ -620,6 +621,19 @@ function MessageBubble({
                   <span className="text-white font-medium">{message.report.graph.case_meta?.asset_symbol}</span>
                 </div>
               </div>
+            )}
+
+            {/* Mermaid Diagram - collapsible */}
+            {message.report.mermaid && (
+              <details className="group">
+                <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2">
+                  <span className="group-open:rotate-90 transition-transform">▶</span>
+                  📈 View Mermaid Diagram
+                </summary>
+                <div className="mt-2">
+                  <MermaidDiagram chart={message.report.mermaid} />
+                </div>
+              </details>
             )}
 
             {/* ASCII Tree - collapsible */}

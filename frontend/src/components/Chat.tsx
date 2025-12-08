@@ -31,27 +31,67 @@ interface Message {
   canContinue?: boolean;
 }
 
+interface TraceStep {
+  step_index: number;
+  from: string;
+  to: string;
+  tx_hash: string;
+  amount_estimate: number;
+  asset: string;
+  step_type: string;
+  service_label?: string;
+  reasoning?: string;
+}
+
+interface TracePath {
+  path_id: string;
+  description: string;
+  steps: TraceStep[];
+  stop_reason?: string;
+}
+
+interface TraceEntity {
+  address: string;
+  role: string;
+  risk_score?: number;
+  labels: string[];
+}
+
 interface TraceReport {
   summary_text: string;
   ascii_tree: string;
   mermaid: string;
-  paths: any[];
-  entities: any[];
+  graph: {
+    case_meta: {
+      case_id: string;
+      victim_address: string;
+      blockchain_name: string;
+      asset_symbol: string;
+      approx_date?: string;
+    };
+    nodes: any[];
+    edges: any[];
+    paths: any[];
+  };
 }
 
 const WELCOME_MESSAGE = `# 👋 Welcome to AMLBot Crypto Tracer
 
 I can help you trace cryptocurrency fund movements across blockchains.
 
-**To get started, describe your case:**
-- Provide the **victim wallet address** or **theft transaction hash**
-- Specify the **blockchain** (ETH, TRX, BTC, etc.)
-- Include any additional context like approximate date or asset type
+### What I need from you:
 
-**Example:**
-> "I need to trace stolen USDT from wallet 0x1234...abcd on Ethereum. The theft occurred around December 1st, 2024."
+1. **Transaction hash** or **Victim wallet address**
+2. **Blockchain network** (eth, trx, btc, bsc, etc.)
+3. **Stolen asset** (USDT, ETH, TRX, etc.)
 
-I'll collect the necessary information step by step before starting the trace.
+### Examples:
+
+> \`64541a3741602...48e2070\` (then I'll ask for blockchain & asset)
+
+> \`trx USDT 0x1234...abcd\`
+
+> \`Trace stolen USDT from TDxyz... on Tron\`
 `;
 
 export function Chat() {
@@ -67,6 +107,7 @@ export function Chat() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [previousReports, setPreviousReports] = useState<TraceReport[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -78,14 +119,14 @@ export function Chat() {
     scrollToBottom();
   }, [messages]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading) return;
+  // Core message sending function - used by both form submit and quick actions
+  const sendMessage = async (messageText: string, showAsUserMessage: boolean = true) => {
+    if (!messageText.trim() || isLoading) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content: messageText.trim(),
       timestamp: new Date(),
       status: "complete",
     };
@@ -98,9 +139,30 @@ export function Chat() {
       status: "pending",
     };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    // Only show user message if it's a visible action
+    if (showAsUserMessage) {
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    } else {
+      // For quick actions, just show assistant response
+      setMessages((prev) => [...prev, assistantMessage]);
+    }
     setInput("");
     setIsLoading(true);
+
+    await processApiCall(messageText, assistantMessage.id);
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    await sendMessage(input, true);
+  };
+
+  // Quick action handler - triggers action immediately without showing as user message
+  const handleQuickAction = async (action: string, showMessage: boolean = false) => {
+    await sendMessage(action, showMessage);
+  };
+
+  const processApiCall = async (messageText: string, assistantMessageId: string) => {
 
     try {
       // Create abort controller for timeout (5 minutes for long traces)
@@ -113,7 +175,7 @@ export function Chat() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: userMessage.content,
+          message: messageText,
           session_id: sessionId,
         }),
         signal: controller.signal,
@@ -157,7 +219,7 @@ export function Chat() {
                 statusMessages.push(data.message);
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMessage.id
+                    m.id === assistantMessageId
                       ? {
                           ...m,
                           content: statusMessages.map((s) => `⏳ ${s}`).join("\n"),
@@ -169,19 +231,29 @@ export function Chat() {
               } else if (data.type === "trace_started") {
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMessage.id
+                    m.id === assistantMessageId
                       ? { ...m, traceUrl: data.trace_url }
                       : m
                   )
                 );
               } else if (data.type === "result") {
                 const hasOptions = data.continuation_options && data.continuation_options.length > 0;
+
+                // Prepare combined reports for formatting
+                // We need to include the current report + any previous ones
+                // Note: we can't use the updated 'previousReports' state immediately here as state updates are async
+                const currentAndPrevious = [...previousReports];
+                if (data.report) {
+                    // Only add to state if we haven't already (to avoid dups in strict mode)
+                    setPreviousReports((prev) => [...prev, data.report]);
+                }
+
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMessage.id
+                    m.id === assistantMessageId
                       ? {
                           ...m,
-                          content: formatReport(data.report, hasOptions),
+                          content: formatReport(data.report, hasOptions, currentAndPrevious),
                           report: data.report,
                           status: "complete",
                           responseType: hasOptions ? "continuation" : "result",
@@ -191,14 +263,16 @@ export function Chat() {
                       : m
                   )
                 );
+
                 // Reset session when trace is complete (no continuation needed)
                 if (!hasOptions) {
                   setSessionId(null);
+                  setPreviousReports([]);
                 }
               } else if (data.type === "error") {
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMessage.id
+                    m.id === assistantMessageId
                       ? {
                           ...m,
                           content: `❌ Error: ${data.message}`,
@@ -224,7 +298,7 @@ export function Chat() {
 
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantMessage.id
+            m.id === assistantMessageId
               ? {
                   ...m,
                   content: data.message,
@@ -249,7 +323,7 @@ export function Chat() {
       }
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantMessage.id
+          m.id === assistantMessageId
             ? {
                 ...m,
                 content: `❌ Error: ${errorMessage}`,
@@ -263,12 +337,53 @@ export function Chat() {
     }
   };
 
-  const formatReport = (report: TraceReport, hasOptions: boolean = false): string => {
-    // Only show "Paused" if there are options that need user decision (bridges, etc.)
-    const title = hasOptions
-      ? "## 🔄 Trace Complete - Further Options Available"
-      : "## ✅ Trace Complete";
-    return `${title}\n\n${report.summary_text}`;
+  const formatReport = (report: TraceReport, hasOptions: boolean = false, previousReports: TraceReport[] = []): string => {
+    // Build a cleaner summary from the graph data
+    const meta = report.graph?.case_meta;
+
+    let msg = hasOptions
+      ? "## 🔄 Trace Complete - Further Options Available\n\n"
+      : "## ✅ Trace Complete\n\n";
+
+    if (meta) {
+      msg += `**Case:** ${meta.case_id}\n\n`;
+      msg += `| Field | Value |\n|-------|-------|\n`;
+      msg += `| Victim | \`${meta.victim_address?.slice(0, 12)}...${meta.victim_address?.slice(-6)}\` |\n`;
+      msg += `| Blockchain | ${meta.blockchain_name?.toUpperCase()} |\n`;
+      msg += `| Asset | ${meta.asset_symbol} |\n`;
+      if (meta.approx_date) {
+        msg += `| Date | ${meta.approx_date} |\n`;
+      }
+      msg += "\n";
+    }
+
+    // Combine paths from previous reports
+    let allPaths = [];
+    for (const prev of previousReports) {
+        if (prev.graph?.paths) {
+            allPaths.push(...prev.graph.paths);
+        }
+    }
+    // Add current paths
+    if (report.graph?.paths) {
+        allPaths.push(...report.graph.paths);
+    }
+
+    // Add paths summary
+    if (allPaths.length > 0) {
+      msg += `### 📊 Trace Paths (${allPaths.length})\n\n`;
+      for (const path of allPaths) {
+        const endpoint = path.last_address
+          ? `\`${path.last_address.slice(0, 8)}...${path.last_address.slice(-6)}\``
+          : "Unknown";
+        msg += `- **Path ${path.path_id}**: ${path.total_steps} steps → ${endpoint}\n`;
+        if (path.stop_reason) {
+          msg += `  - *${path.stop_reason}*\n`;
+        }
+      }
+    }
+
+    return msg;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -289,14 +404,6 @@ export function Chat() {
       },
     ]);
     setSessionId(null);
-  };
-
-  const handleQuickAction = (action: string) => {
-    setInput(action);
-    // Focus input and submit
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
   };
 
   return (
@@ -458,7 +565,7 @@ function MessageBubble({
                       )}
                     </div>
                     <div className="text-xs text-gray-500 mt-1">
-                      {opt.last_amount.toLocaleString()} {opt.asset} • {opt.role}
+                      {opt.description || `${opt.last_amount.toLocaleString()} ${opt.asset} • ${opt.role}`}
                     </div>
                   </div>
                   <ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-emerald-400 transition-colors" />
@@ -494,16 +601,49 @@ function MessageBubble({
           </a>
         )}
 
-        {/* ASCII Tree for reports */}
-        {message.report?.ascii_tree && (
-          <details className="mt-4">
-            <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300">
-              📊 View Trace Tree
-            </summary>
-            <div className="ascii-tree mt-2 text-xs">
-              {message.report.ascii_tree}
-            </div>
-          </details>
+        {/* Report details for trace results */}
+        {message.report && (
+          <div className="mt-4 space-y-3">
+            {/* Quick stats */}
+            {message.report.graph?.paths && (
+              <div className="flex gap-4 text-sm">
+                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+                  <span className="text-gray-400">Paths:</span>{" "}
+                  <span className="text-white font-medium">{message.report.graph.paths.length}</span>
+                </div>
+                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+                  <span className="text-gray-400">Chain:</span>{" "}
+                  <span className="text-white font-medium">{message.report.graph.case_meta?.blockchain_name?.toUpperCase()}</span>
+                </div>
+                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+                  <span className="text-gray-400">Asset:</span>{" "}
+                  <span className="text-white font-medium">{message.report.graph.case_meta?.asset_symbol}</span>
+                </div>
+              </div>
+            )}
+
+            {/* ASCII Tree - collapsible */}
+            <details className="group">
+              <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2">
+                <span className="group-open:rotate-90 transition-transform">▶</span>
+                📊 View Trace Flow Diagram
+              </summary>
+              <div className="ascii-tree mt-2 text-xs overflow-x-auto">
+                {message.report.ascii_tree}
+              </div>
+            </details>
+
+            {/* Full Summary - collapsible */}
+            <details>
+              <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300 flex items-center gap-2">
+                <span className="group-open:rotate-90 transition-transform">▶</span>
+                📄 View Full Summary
+              </summary>
+              <div className="mt-2 text-sm text-gray-300 whitespace-pre-wrap bg-gray-800 p-3 rounded-lg max-h-96 overflow-y-auto">
+                {message.report.summary_text}
+              </div>
+            </details>
+          </div>
         )}
       </div>
     </div>

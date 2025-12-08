@@ -61,3 +61,7 @@ Return the tool output as-is."""
     async def bridge_analyzer(self, chain: str, tx_hash: str) -> Dict[str, Any]:
         instruction = f'Use bridge-analyzer with chain="{chain}", tx_hash="{tx_hash}"'
         return await self._execute(instruction)
+
+    async def expert_search(self, hash: str, filter: str = "explorer") -> Dict[str, Any]:
+        instruction = f'Use expert-search with hash="{hash}", filter="{filter}"'
+        return await self._execute(instruction)

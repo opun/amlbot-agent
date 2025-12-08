@@ -22,7 +22,8 @@ from agent.theft_detection import (
     infer_asset_symbol,
     fetch_candidate_theft_txs,
     choose_theft_tx,
-    infer_approx_date_from_description
+    infer_approx_date_from_description,
+    extract_victim_from_tx_hash
 )
 from agent.classification import AddressClassifier
 
@@ -75,18 +76,46 @@ class CryptoTracer:
         # Generate Trace ID for OpenAI Tracing
         trace_id = gen_trace_id()
 
+        # Mode 2: Extract victim_address from tx_hash if needed
+        if not config.victim_address and config.tx_hash:
+            logger.debug(f"Extracting victim address from tx_hash: {config.tx_hash}")
+            victim_addr, extracted_token_id, extracted_asset, block_time = await extract_victim_from_tx_hash(
+                config.tx_hash, config.blockchain_name, self.client
+            )
+            config.victim_address = victim_addr
+            if extracted_token_id is not None:
+                # Store extracted token_id for later use
+                config._extracted_token_id = extracted_token_id
+            if extracted_asset and not config.asset_symbol:
+                config.asset_symbol = extracted_asset
+            if block_time and not config.approx_date:
+                # Convert block_time to date string
+                try:
+                    dt = datetime.fromtimestamp(block_time)
+                    config.approx_date = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
+        # Ensure victim_address is set
+        if not config.victim_address:
+            raise ValueError("victim_address is required. Either provide it directly or provide tx_hash to extract it.")
+
         # Auto-detect approx date if missing
-        if not config.approx_date:
+        if not config.approx_date and config.description:
             config.approx_date = infer_approx_date_from_description(config.description)
 
         # Auto-detect asset if missing
         asset_symbol, token_id = await infer_asset_symbol(config, self.client)
         config.asset_symbol = asset_symbol # Update config with detected asset
 
+        # Use extracted token_id if available
+        if hasattr(config, '_extracted_token_id') and config._extracted_token_id is not None:
+            token_id = config._extracted_token_id
+
         case_meta = CaseMeta(
             case_id=case_id,
             trace_id=trace_id,
-            description=config.description,
+            description=config.description or "",
             victim_address=config.victim_address,
             blockchain_name=config.blockchain_name,
             chains=[config.blockchain_name],

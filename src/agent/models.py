@@ -3,20 +3,22 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
 class TracerConfig(BaseModel):
-    description: str
-    victim_address: str
+    description: Optional[str] = None
+    victim_address: Optional[str] = None
     blockchain_name: str = "eth"
     asset_symbol: Optional[str] = None
     approx_date: Optional[str] = None
     known_tx_hashes: List[str] = Field(default_factory=list)
     max_hops: int = 10
     max_branches_per_hop: int = 3
-    min_amount_ratio: float = 0.05
+    min_amount_ratio: float = 0.10
+    tx_hash: Optional[str] = None
+    theft_asset: Optional[str] = None
 
 class CaseMeta(BaseModel):
     case_id: str
     trace_id: Optional[str] = None
-    description: str
+    description: str = ""
     victim_address: str
     blockchain_name: str
     chains: List[str]

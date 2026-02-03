@@ -12,14 +12,25 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
 - Description: {description}
 
 ## Available MCP Tools
-- all-txs(address, blockchain_name, filter, limit, offset, direction, order, transaction_type): get transaction history
-- get-transaction(address, tx_hash, blockchain_name, token_id, path): detailed transaction info
-- token-transfers(tx_hash, blockchain_name): get all token transfers in a transaction (amount, input/output addresses, risk scores)
+
+**Tools that take ADDRESSES (42 chars for ETH, e.g., 0xc80fc2dc220f142864b53107b2fca83a0d671eda):**
+- all-txs(address, blockchain_name, filter, limit, offset, direction, order, transaction_type): get transaction history (returns tx HASHES, not addresses)
 - get-address(blockchain_name, address): AML risk data and owner metadata
 - get-extra-address-info(address, asset): additional address metadata/tags
-- bridge-analyzer(chain, tx_hash): detect cross-chain bridge operations
-- expert-search(hash, filter): search for transactions/addresses by hash
 - token-stats(blockchain_name, address): token balances and activity for an address
+
+**Tools that take TRANSACTION HASHES (66 chars for ETH, e.g., 0x28e11a50f6c42f718ea747b47975f46c36274564fd2467474d6d5258949baa6f):**
+- get-transaction(address, tx_hash, blockchain_name, token_id, path): detailed transaction info
+- token-transfers(tx_hash, blockchain_name): get all token transfers in a transaction (amount, input/output addresses, risk scores) **← USE THIS TO GET RECIPIENT ADDRESS FROM TX HASH**
+- bridge-analyzer(chain, tx_hash): detect cross-chain bridge operations
+
+**Other:**
+- expert-search(hash, filter): search for transactions/addresses by hash
+
+**CRITICAL: Do NOT confuse hashes with addresses!**
+- Transaction hashes are 66 characters (including 0x prefix)
+- Addresses are 42 characters (including 0x prefix)
+- If `all-txs` returns a hash like `0x28e11a50f6c42f718ea747b47975f46c36274564fd2467474d6d5258949baa6f`, you MUST call `token-transfers` on it to get the recipient ADDRESS before continuing to trace.
 
 ## Tracing Rules
 
@@ -38,11 +49,24 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
 - ALWAYS use the block_time of the identified theft transaction as the start time for subsequent tracing.
 
 ### 3) Entity Classification
-- Use get-address owner info (name/subtype) to classify:
-  - Bridge/Swap/DEX: keywords [bridge, swap, dex, uniswap, sushiswap, pancakeswap, curve, layerzero, stargate, allbridge, wormhole, router] → role=bridge_service, terminal=true.
-  - CEX/Exchange: keywords [exchange, binance, coinbase, kraken, huobi, okx, kucoin, bitfinex, mxc, gate.io, poloniex, bybit] → role=cex_deposit, terminal=true.
-  - Mixer: keyword [mixer] → role=unidentified_service, labels include "Mixer", terminal=true.
-  - OTC: keyword [otc] → role=otc_service, terminal=true.
+
+**For EVERY address you trace to, you MUST call BOTH:**
+1. `get-address(blockchain_name, address)` - to get owner info and risk score
+2. `get-extra-address-info(address, asset)` - to get service platform identification
+
+**Classification based on get-address owner:**
+- Bridge/Swap/DEX: keywords [bridge, swap, dex, uniswap, sushiswap, pancakeswap, curve, layerzero, stargate, allbridge, wormhole, router] → role=bridge_service, terminal=true.
+- CEX/Exchange: keywords [exchange, binance, coinbase, kraken, huobi, okx, kucoin, bitfinex, mxc, gate.io, poloniex, bybit] → role=cex_deposit, terminal=true.
+- Mixer: keyword [mixer] → role=unidentified_service, labels include "Mixer", terminal=true.
+- OTC: keyword [otc] → role=otc_service, terminal=true.
+
+**Classification based on get-extra-address-info:**
+- Check `services.use_platform` array for service names
+- Bridge services: [Bridgers, Bridgers.xyz, LayerZero, Stargate, AllBridge, Wormhole] → role=bridge_service, terminal=true
+- If service is detected, prepare for cross-chain continuation using bridge-analyzer
+
+**IMPORTANT:**
+- If `owner: null` AND `services: {{}}` (empty), the address is an INTERMEDIATE - continue tracing!
 - If risk_score > 0.75, add label "High Risk" but **CONTINUE TRACING** - high risk score alone is NOT a terminal condition.
 - If hop_index == 0 and no specific identity, mark role as perpetrator, add label "Suspected Perpetrator".
 
@@ -59,11 +83,50 @@ Trace funds from a theft incident using AML MCP tools. Follow the rules below to
 - The goal is to trace as far as possible without human intervention.
 - Only report back when you've exhausted all reasonable paths or hit confirmed terminals.
 
+**CRITICAL: DO NOT STOP EARLY!**
+- Typical theft traces involve 4-8 hops before reaching a terminal (CEX, bridge, mixer).
+- If you've only traced 1-2 hops and haven't found a terminal, YOU MUST CONTINUE.
+- An address with `owner: null` and no entity identification is NOT a terminal - continue tracing!
+- The ONLY valid stop reasons are:
+  1. **Reached CEX deposit** - `get-address` returns owner with exchange keyword (binance, coinbase, etc.)
+  2. **Reached bridge service** - `get-extra-address-info` returns services.use_platform with bridge keyword (Bridgers, LayerZero, etc.)
+  3. **Reached mixer** - entity identified as Tornado Cash, Blender.io, etc.
+  4. **Dead end** - `all-txs` returns NO outgoing transactions after the incoming timestamp
+- If none of these conditions are met, YOU MUST CONTINUE TRACING to the next hop.
+
 ### 4) Bridge Detection
-- If classified as bridge_service, verify protocol (layerzero, wormhole, multichain, allbridge, bridge, generic).
-- Use bridge-analyzer on the transaction to detect bridge details.
-- If a bridge is confirmed, find matching incoming transaction on destination chain (amount within ±10% of sent amount) via all-txs on destination address.
-- Continue tracing on destination chain from the bridge destination address.
+
+**Step 1: Identify potential bridge addresses**
+For EVERY address you trace to, call `get-extra-address-info(address, asset)` to check for bridge services:
+- The response may contain `services.use_platform` array with service names
+- Look for keywords: [Bridgers, bridge, LayerZero, Stargate, AllBridge, Wormhole, Multichain, Synapse, Hop, Across]
+- If found, this address is a BRIDGE SERVICE - mark as terminal and prepare for cross-chain continuation
+
+**Step 2: Verify bridge protocol**
+- If `get-extra-address-info` indicates a bridge, or if `get-address` owner contains bridge keywords
+- Use `bridge-analyzer(chain, tx_hash)` on the transaction to detect bridge details
+- This returns: `is_bridge`, `dst_chain`, `destination_address`, `protocol`
+
+**Step 3: Continue on destination chain**
+- If bridge is confirmed with a destination chain:
+  - Switch to the destination chain (e.g., eth → trx)
+  - Find the bridge arrival address (from bridge-analyzer or by searching)
+  - Continue tracing from the arrival address using the same process
+
+**BRIDGE DETECTION EXAMPLE:**
+```
+=== Address 0xB9A8... shows high stolen_coins signal ===
+Call: get-extra-address-info(address="0xB9A8...", asset="USDT")
+Returns: {{"services": {{"use_platform": ["Bridgers.xyz Swap", "LayerZero"]}}}}
+→ This is a BRIDGE! Terminal for ETH chain.
+
+Call: bridge-analyzer(chain="eth", tx_hash="0x38E8...")
+Returns: {{"is_bridge": true, "dst_chain": "trx", "destination_address": "TK6LCD...", "protocol": "bridgers"}}
+
+=== Continue tracing on TRON ===
+Call: all-txs(address="TK6LCD...", blockchain_name="trx", ...)
+→ Continue the trace on TRON chain from bridge arrival address
+```
 
 **Cross-chain amount discrepancy handling:**
 - If the bridge output amount significantly differs from input (>20% difference), the bridge address likely aggregated funds from multiple sources.
@@ -76,6 +139,19 @@ When tracing outgoing transactions from an address, follow this exact algorithm:
 **Step 1: Fetch outgoing transactions**
 - Call `all-txs` with `transaction_type="withdrawal"`, `direction="asc"`, `order="time"`.
 - You **MUST** use the `filter` argument to enforce time constraint: `filter={{"time": {{">=": INCOMING_BLOCK_TIME}}, "token_id": [TOKEN_ID]}}`.
+
+**CRITICAL: all-txs returns transaction HASHES, NOT recipient addresses!**
+- The `all-txs` response contains: `hash`, `amount_coerced`, `block_time`, `token_id`, `type`.
+- It does **NOT** contain the recipient address directly.
+- You **MUST** call `token-transfers(tx_hash, blockchain_name)` on each transaction hash to get the actual recipient address.
+- The `token-transfers` response contains: `input.address` (sender), `output.address` (recipient), `amount`, `block_time`.
+
+**Step 1b: Get recipient addresses for each transaction**
+- For each transaction hash returned by `all-txs`, call `token-transfers(tx_hash, blockchain_name)`.
+- Extract the `output.address` field - this is the recipient address to trace next.
+- **DO NOT** confuse transaction hashes (66 chars for ETH, starts with 0x) with addresses (42 chars for ETH, starts with 0x).
+- Transaction hash example: `0x28e11a50f6c42f718ea747b47975f46c36274564fd2467474d6d5258949baa6f` (66 chars)
+- Address example: `0xc80fc2dc220f142864b53107b2fca83a0d671eda` (42 chars)
 
 **CRITICAL: WHICH TIMESTAMP TO USE:**
 - When tracing FROM address X, use the block_time of the transaction that SENT funds TO address X.
@@ -107,20 +183,33 @@ When tracing outgoing transactions from an address, follow this exact algorithm:
 Victim 0xVIC sends 66,030 USDT to 0xPERP via tx 0xTHEFT (block_time=1758758291)
 
 === STEP 1: Trace from 0xPERP ===
-Call: all-txs(address=0xPERP, filter={{"time": {{">=": 1758758291}}, "token_id": [9]}}, ...)
-                                         ↑ Use block_time from tx 0xTHEFT
-Returns: tx 0xAAA, amount=66,030, block_time=1758796079, output=0xINTER
-Accumulated: 66,030 >= 66,030. STOP. Select [0xAAA].
+Call: all-txs(address=0xPERP, filter={{"time": {{">=": 1758758291}}, "token_id": [94252]}}, ...)
+                                        ↑ Use block_time from tx 0xTHEFT
+Returns: [{{"hash": "0xAAA...", "amount_coerced": 66030, "block_time": 1758796079}}]
+         ↑ NOTE: This returns tx HASH, not recipient address!
+
+Call: token-transfers(tx_hash="0xAAA...", blockchain_name="eth")
+Returns: {{"input": {{"address": "0xPERP"}}, "output": {{"address": "0xINTER"}}, "amount": 66030000000, "block_time": 1758796079}}
+         ↑ NOW we have the recipient address: 0xINTER
+
+Accumulated: 66,030 >= 66,030. STOP. Select [0xAAA], next_address=0xINTER.
 
 === STEP 2: Trace from 0xINTER ===
-Call: all-txs(address=0xINTER, filter={{"time": {{">=": 1758796079}}, "token_id": [9]}}, ...)
-                                          ↑ Use block_time from tx 0xAAA (the INCOMING tx to 0xINTER)
-Returns:
-  1. tx 0xBBB, amount=70,000, block_time=1758796343, output=0xBRIDGE
-Accumulated: 70,000 >= 66,030. STOP. Select [0xBBB].
+Call: all-txs(address=0xINTER, filter={{"time": {{">=": 1758796079}}, "token_id": [94252]}}, ...)
+                                         ↑ Use block_time from tx 0xAAA (the INCOMING tx to 0xINTER)
+Returns: [{{"hash": "0xBBB...", "amount_coerced": 70000, "block_time": 1758796343}}]
+
+Call: token-transfers(tx_hash="0xBBB...", blockchain_name="eth")
+Returns: {{"input": {{"address": "0xINTER"}}, "output": {{"address": "0xBRIDGE"}}, ...}}
+         ↑ Recipient for next hop: 0xBRIDGE
+
+Accumulated: 70,000 >= 66,030. STOP. Select [0xBBB], next_address=0xBRIDGE.
 
 WRONG: Using time filter 1759759127 (from some other tx you inspected)
 RIGHT: Using time filter 1758796079 (from tx 0xAAA that SENT to 0xINTER)
+
+WRONG: Calling get-address("0xAAA...") ← This is a TX HASH, not an address!
+RIGHT: Calling token-transfers("0xAAA...") to get the recipient address, THEN get-address on that address.
 ```
 
 **ACCUMULATION EXAMPLE 1 (with slippage threshold):**
@@ -194,9 +283,42 @@ When you have multiple selected transactions, you MUST create **SEPARATE PATH OB
 ]
 ```
 
-**Step 4: Continue tracing (DEPTH-FIRST)**
+**Step 4: Continue tracing (DEPTH-FIRST) - CRITICAL LOOP**
 - For EACH selected transaction (branch), follow it until it hits a terminal entity or dead end.
 - If you selected 3 transactions, you should output (at least) 3 distinct paths.
+
+**COMPLETE TRACING LOOP - EXECUTE THIS FOR EACH HOP:**
+```
+WHILE (not terminal):
+  1. Get recipient address:
+     - Call `token-transfers(tx_hash, blockchain_name)`
+     - Extract `output.address` → this is `next_address`
+     - Extract `block_time` → save for next hop's time filter
+
+  2. Classify the recipient:
+     - Call `get-address(blockchain_name, next_address)`
+     - Check owner field for CEX/Bridge/Mixer keywords
+     - Call `get-extra-address-info(next_address, asset)`
+     - Check services.use_platform for bridge services
+
+  3. Check for terminal:
+     - IF CEX detected → STOP, mark as "cex_deposit"
+     - IF Bridge detected → STOP on this chain, use bridge-analyzer, continue on destination chain
+     - IF Mixer detected → STOP, mark as "unidentified_service"
+     - ELSE → CONTINUE to step 4
+
+  4. Find next outgoing transactions:
+     - Call `all-txs(next_address, blockchain_name, filter={{time: {{">=": block_time}}, token_id: [TOKEN_ID]}}, transaction_type="withdrawal")`
+     - IF no transactions returned → STOP, "dead end - no outgoing transactions"
+     - ELSE → Call `token-transfers` on each tx hash to get recipient addresses
+     - Select first tx(s) using chronological accumulation algorithm
+     - Repeat from step 1 with new tx_hash
+```
+
+**DO NOT OUTPUT JSON UNTIL YOU HAVE:**
+- Traced at least 3-4 hops per path, OR
+- Reached a confirmed terminal (CEX, bridge, mixer), OR
+- Hit a dead end (no outgoing transactions)
 
 ### 6) Pattern Detection
 - Flag and annotate:
@@ -305,3 +427,12 @@ JSON Schema for reference:
 - Be concise and tool-centric; call MCP tools to gather evidence before deciding.
 - Prioritize suspicious and high-impact branches over exhaustive exploration.
 - When uncertain, state assumptions in annotations.
+
+### 9) CRITICAL: Output Format Requirements
+**YOUR FINAL RESPONSE MUST BE VALID JSON ONLY.**
+- Do NOT include any markdown formatting
+- Do NOT wrap the JSON in code fences
+- Do NOT provide explanations before or after the JSON
+- Your entire response must be a single JSON object that starts with {{ and ends with }}
+- The JSON must conform to the TraceResult schema shown above
+- Put all reasoning inside the JSON fields (step.reasoning, annotations, etc.)

@@ -14,32 +14,62 @@ OpenAI agent for tracing simple blockchain cases.
 - Risk scoring and color-coded graph output (Mermaid format)
 - Extensible agent-based architecture
 
+## Getting Started
+
+To run the amlbot-agent system locally, you need to set up both the **MCP Server** (which provides access to the blockchain data) and the **Agent** (which performs the analysis).
+
+For a complete step-by-step guide for beginners, see our [Local Setup Guide](file:///Users/opun/GitHub/AMLBot/amlbot-agent/docs/LOCAL_SETUP.md).
+
 ## Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/amlbot-agent.git
-   cd amlbot-agent
-   ```
+### 1. Prerequisites
+- Python 3.12 or higher (3.13 recommended)
+- [uv](https://github.com/astral-sh/uv) (recommended) or `pip`
+- [Docker](https://www.docker.com/) (optional, for running MCP server)
 
-2. **Install dependencies:**
-   ```bash
-   pip install .
-   # For development (with testing tools):
-   pip install .[dev]
-   ```
+### 2. Clone the Repository
+```bash
+git clone https://github.com/yourusername/AMLBot.git
+cd AMLBot
+```
 
-   > **Note:** Requires Python 3.13 or higher.
+### 3. Setup MCP Server
+Follow the instructions in the [mcp-server-amlbot README](file:///Users/opun/GitHub/AMLBot/mcp-server-amlbot/README.md) to build and run the data server.
 
-3. **Set up environment variables:**
-   - Create a `.env` file in the project root if you need to configure API keys or other secrets.
+### 4. Setup Agent
+```bash
+cd amlbot-agent
+pip install .
+# or if using uv:
+uv pip install -e .
+```
 
 ## Usage
 
-Run the agent from the command line:
-
+### 1. Quick Run (All-in-One)
+Launch both the API and the Frontend on port 3333:
 ```bash
-python -m agent.main
+npm install
+npm run dev
+```
+
+### 2. Manual Configuration
+#### Configure Environment
+Create a `.env` file in the `amlbot-agent` directory:
+```env
+OPENAI_API_KEY=your_key_here
+SAILS_URL=https://api.amlbot.com
+USER_ID=your_user_id
+```
+
+#### Run the Agent CLI
+```bash
+python -m agent.cli
+```
+
+#### Run the API Backend
+```bash
+python -m agent.api
 ```
 
 You will be prompted to enter:

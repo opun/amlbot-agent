@@ -11,18 +11,26 @@ from typing import Optional, AsyncGenerator, Dict, Any, List
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+# Load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import os
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
 from agent.models import TracerConfig, TraceResult
 from agent.mcp_client import MCPClient
+from agent.mcp_http_client import MCPHTTPClient, VisualizationAPIClient
 from agent.tracer import CryptoTracer
+from agent.http_tracer import HTTPCryptoTracer
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
+from agent.visualization import generate_visualization_payload
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -60,6 +68,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None  # Can be passed from NextAuth session
 
 
 class TraceRequest(BaseModel):
@@ -71,10 +80,30 @@ class TraceRequest(BaseModel):
     tx_hashes: Optional[list[str]] = None
     tx_hash: Optional[str] = None
     theft_asset: Optional[str] = None
+    user_id: Optional[str] = None  # Can be passed from NextAuth session
 
 
 # In-memory session storage (use Redis in production)
 sessions: Dict[str, SessionState] = {}
+
+
+def get_user_id_from_request(request: Request, body_user_id: Optional[str] = None) -> Optional[str]:
+    """Extract userId from multiple sources (priority order):
+    1. Body parameter (from NextAuth session)
+    2. X-User-Id header
+    3. userId cookie
+    """
+    # Priority 1: Body parameter (passed from frontend with NextAuth session)
+    if body_user_id:
+        return body_user_id
+
+    # Priority 2: X-User-Id header
+    header_user_id = request.headers.get("X-User-Id")
+    if header_user_id:
+        return header_user_id
+
+    # Priority 3: Cookie
+    return request.cookies.get("userId")
 
 
 @asynccontextmanager
@@ -329,28 +358,159 @@ def build_confirmation_message(info: Dict[str, Any]) -> str:
 
 async def run_trace_streaming(
     config: TracerConfig,
-    session: Optional[SessionState] = None
+    session: Optional[SessionState] = None,
+    user_id: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """Run a trace and yield streaming updates."""
 
-    yield json.dumps({"type": "status", "message": "Initializing MCP server..."}) + "\n"
+    if not user_id:
+        yield json.dumps({"type": "error", "message": "Authentication required"}) + "\n"
+        return
 
-    async with MCPServerStdio(
-        name="AMLBot MCP Server",
-        params={
-            "command": "docker",
-            "args": ["run", "-i", "--rm", "-e", "USER_ID=a2fa961b7f4977981e3796916328d930", "mcp-server-amlbot:local"]
-        },
-        client_session_timeout_seconds=300.0,
-    ) as server:
-        trace_id = gen_trace_id()
-        yield json.dumps({
-            "type": "trace_started",
-            "trace_id": trace_id,
-            "trace_url": f"https://platform.openai.com/traces/trace?trace_id={trace_id}"
-        }) + "\n"
+    # Check if we should use HTTP mode
+    use_http = os.getenv("MCP_USE_HTTP", "false").lower() == "true"
+    mcp_server_url = os.getenv("MCP_SERVER_URL", "http://localhost:8001")
 
-        with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+    if use_http:
+        # HTTP mode - uses HTTP client and OpenAI function calling
+        yield json.dumps({"type": "status", "message": "Connecting to MCP HTTP server..."}) + "\n"
+        async for chunk in _run_trace_http(config, session, user_id, mcp_server_url):
+            yield chunk
+    else:
+        # Stdio mode - uses Docker container with MCP stdio protocol
+        yield json.dumps({"type": "status", "message": "Starting MCP server..."}) + "\n"
+        async for chunk in _run_trace_stdio(config, session, user_id):
+            yield chunk
+
+
+async def _run_trace_http(
+    config: TracerConfig,
+    session: Optional[SessionState],
+    user_id: str,
+    mcp_server_url: str
+) -> AsyncGenerator[str, None]:
+    """Run trace using HTTP MCP server."""
+    import uuid
+
+    trace_id = f"http-{uuid.uuid4().hex[:12]}"
+    yield json.dumps({
+        "type": "trace_started",
+        "trace_id": trace_id,
+        "trace_url": None  # No OpenAI trace URL for HTTP mode
+    }) + "\n"
+
+    http_client = MCPHTTPClient(mcp_server_url, user_id)
+    viz_client = None
+
+    try:
+        tracer = HTTPCryptoTracer(http_client)
+
+        yield json.dumps({"type": "status", "message": "Running trace analysis..."}) + "\n"
+
+        try:
+            result = await tracer.trace(config)
+
+            yield json.dumps({"type": "status", "message": "Building report..."}) + "\n"
+            report = build_report(result)
+
+            # Generate visualization JSON
+            yield json.dumps({"type": "status", "message": "Generating visualization..."}) + "\n"
+            visualization_data = generate_visualization_payload(
+                result,
+                title=f"Trace: {config.victim_address or config.tx_hash}"
+            )
+
+            # Save and share visualization
+            share_url = None
+            visualization_id = None
+            viz_api_url = os.getenv("NEXT_PUBLIC_API_URL")
+
+            if viz_api_url:
+                try:
+                    yield json.dumps({"type": "status", "message": "Saving visualization..."}) + "\n"
+                    viz_client = VisualizationAPIClient(viz_api_url, user_id)
+
+                    share_result = await viz_client.save_and_share(visualization_data)
+                    visualization_id = share_result.get("visualization_id")
+                    share_url = share_result.get("share_url")
+
+                    logger.info(f"Visualization saved with ID: {visualization_id}, share URL: {share_url}")
+                except Exception as viz_error:
+                    logger.warning(f"Failed to save/share visualization: {viz_error}")
+                    # Don't fail the whole trace if visualization fails
+            else:
+                logger.warning("NEXT_PUBLIC_API_URL not set, skipping visualization save/share")
+
+            # Extract continuation options using HTTP client
+            continuation_options = await _extract_continuation_options_http(result, http_client, config)
+
+            # Store trace result in session for continuation
+            if session:
+                session.last_trace_result = report
+                session.continuation_options = continuation_options
+                if continuation_options:
+                    session.step = "awaiting_continuation"
+                else:
+                    session.step = "trace_complete"
+
+            response_data = {
+                "type": "result",
+                "report": report,
+                "trace_id": trace_id,
+                "visualization": visualization_data.get("data"),  # Include visualization data
+            }
+
+            # Add visualization share info if available
+            if visualization_id:
+                response_data["visualization_id"] = visualization_id
+            if share_url:
+                response_data["visualization_url"] = share_url
+
+            if continuation_options:
+                response_data["continuation_options"] = continuation_options
+                response_data["can_continue"] = True
+            else:
+                response_data["can_continue"] = False
+
+            yield json.dumps(response_data) + "\n"
+
+        except Exception as e:
+            logger.error(f"Trace error: {e}")
+            yield json.dumps({
+                "type": "error",
+                "message": str(e)
+            }) + "\n"
+
+    finally:
+        await http_client.aclose()
+        if viz_client:
+            await viz_client.aclose()
+
+
+async def _run_trace_stdio(
+    config: TracerConfig,
+    session: Optional[SessionState],
+    user_id: str
+) -> AsyncGenerator[str, None]:
+    """Run trace using stdio MCP server (Docker)."""
+    trace_id = gen_trace_id()
+    yield json.dumps({
+        "type": "trace_started",
+        "trace_id": trace_id,
+        "trace_url": f"https://platform.openai.com/traces/trace?trace_id={trace_id}"
+    }) + "\n"
+
+    viz_client = None
+
+    with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+        async with MCPServerStdio(
+            name="AMLBot MCP Server",
+            params={
+                "command": "docker",
+                "args": ["run", "-i", "--rm", "-e", f"USER_ID={user_id}", "mcp-server-amlbot:local"]
+            },
+            client_session_timeout_seconds=300.0,
+        ) as server:
             client = MCPClient(server)
             tracer = CryptoTracer(client)
 
@@ -361,6 +521,34 @@ async def run_trace_streaming(
 
                 yield json.dumps({"type": "status", "message": "Building report..."}) + "\n"
                 report = build_report(result)
+
+                # Generate visualization JSON
+                yield json.dumps({"type": "status", "message": "Generating visualization..."}) + "\n"
+                visualization_data = generate_visualization_payload(
+                    result,
+                    title=f"Trace: {config.victim_address or config.tx_hash}"
+                )
+
+                # Save and share visualization
+                share_url = None
+                visualization_id = None
+                viz_api_url = os.getenv("NEXT_PUBLIC_API_URL")
+
+                if viz_api_url:
+                    try:
+                        yield json.dumps({"type": "status", "message": "Saving visualization..."}) + "\n"
+                        viz_client = VisualizationAPIClient(viz_api_url, user_id)
+
+                        share_result = await viz_client.save_and_share(visualization_data)
+                        visualization_id = share_result.get("visualization_id")
+                        share_url = share_result.get("share_url")
+
+                        logger.info(f"Visualization saved with ID: {visualization_id}, share URL: {share_url}")
+                    except Exception as viz_error:
+                        logger.warning(f"Failed to save/share visualization: {viz_error}")
+                        # Don't fail the whole trace if visualization fails
+                else:
+                    logger.warning("NEXT_PUBLIC_API_URL not set, skipping visualization save/share")
 
                 # Extract continuation options - only when user decision is needed
                 continuation_options = await extract_continuation_options(result, client, config)
@@ -379,7 +567,14 @@ async def run_trace_streaming(
                     "type": "result",
                     "report": report,
                     "trace_id": trace_id,
+                    "visualization": visualization_data.get("data"),  # Include visualization data
                 }
+
+                # Add visualization share info if available
+                if visualization_id:
+                    response_data["visualization_id"] = visualization_id
+                if share_url:
+                    response_data["visualization_url"] = share_url
 
                 if continuation_options:
                     response_data["continuation_options"] = continuation_options
@@ -395,6 +590,81 @@ async def run_trace_streaming(
                     "type": "error",
                     "message": str(e)
                 }) + "\n"
+            finally:
+                if viz_client:
+                    await viz_client.aclose()
+
+
+async def _extract_continuation_options_http(
+    result: TraceResult,
+    client: MCPHTTPClient,
+    config: TracerConfig
+) -> List[Dict[str, Any]]:
+    """Extract continuation options using HTTP client."""
+    options = []
+
+    for path in result.paths:
+        if not path.steps:
+            continue
+
+        last_step = path.steps[-1]
+        last_address = last_step.to_address
+
+        entity = None
+        for e in result.entities:
+            if e.address == last_address:
+                entity = e
+                break
+
+        stop_reason = (path.stop_reason or "").lower()
+
+        needs_user_decision = (
+            "user" in stop_reason or
+            "decision" in stop_reason or
+            "ambiguous" in stop_reason or
+            "multiple" in stop_reason or
+            "choose" in stop_reason
+        )
+
+        is_bridge = entity and entity.role == "bridge_service"
+
+        if is_bridge or needs_user_decision:
+            option = {
+                "address": last_address,
+                "path_id": path.path_id,
+                "last_amount": last_step.amount_estimate,
+                "asset": last_step.asset,
+                "chain": last_step.chain,
+                "last_tx_hash": last_step.tx_hash,
+                "role": entity.role if entity else "unknown",
+                "risk_score": entity.risk_score if entity else None,
+                "stop_reason": path.stop_reason or "Path ended",
+                "description": f"Continue from {last_address[:8]}...{last_address[-6:]} ({entity.role if entity else 'unknown'})"
+            }
+
+            if is_bridge and last_step.tx_hash:
+                try:
+                    logger.info(f"Analyzing bridge tx: {last_step.tx_hash} on {last_step.chain}")
+                    bridge_info = await client.bridge_analyze(last_step.chain, last_step.tx_hash)
+
+                    if bridge_info and bridge_info.get("is_bridge"):
+                        dst_chain = bridge_info.get("dst_chain")
+                        dst_addr = bridge_info.get("destination_address")
+
+                        if dst_chain:
+                            option["bridge_info"] = bridge_info
+                            option["description"] = f"Continue on {dst_chain.upper()}"
+                            if dst_addr:
+                                option["address"] = dst_addr
+                                option["chain"] = dst_chain
+                                option["description"] += f" (Dest: {dst_addr[:8]}...)"
+                except Exception as e:
+                    logger.warning(f"Bridge analysis failed: {e}")
+                    option["bridge_error"] = True
+
+            options.append(option)
+
+    return options
 
 
 async def extract_continuation_options(
@@ -495,11 +765,16 @@ async def root():
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """
     Handle chat messages with multi-turn conversation flow.
     Collects information before starting a trace.
     """
+    # Get userId from body, header, or cookies
+    user_id = get_user_id_from_request(http_request, request.user_id)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required. Please login.")
+
     message = request.message.strip()
     logger.info(f"Chat request received: {message[:100]}...")
 
@@ -509,7 +784,7 @@ async def chat(request: ChatRequest):
     # Get or create session
     session = get_or_create_session(request.session_id)
     session_id = session.session_id
-    logger.info(f"Session: {session_id}, step: {session.step}")
+    logger.info(f"Session: {session_id}, step: {session.step}, user_id: {user_id[:8]}...")
 
     # Check for confirmation triggers
     message_lower = message.lower().strip()
@@ -574,7 +849,7 @@ async def chat(request: ChatRequest):
                 session.step = "tracing"
 
                 return StreamingResponse(
-                    run_trace_streaming(config, session),
+                    run_trace_streaming(config, session, user_id=user_id),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -617,7 +892,7 @@ async def chat(request: ChatRequest):
             session.step = "tracing"
 
             return StreamingResponse(
-                run_trace_streaming(config, session),
+                run_trace_streaming(config, session, user_id=user_id),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -649,7 +924,7 @@ async def chat(request: ChatRequest):
         session.step = "tracing"
 
         return StreamingResponse(
-            run_trace_streaming(config, session),
+            run_trace_streaming(config, session, user_id=user_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -718,11 +993,16 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/api/trace")
-async def start_trace(request: TraceRequest):
+async def start_trace(request: TraceRequest, http_request: Request):
     """
     Start a trace with explicit parameters (bypasses conversation flow).
     Returns a streaming response with progress updates.
     """
+    # Get userId from body, header, or cookies
+    user_id = get_user_id_from_request(http_request, request.user_id)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required. Please login.")
+
     if not request.victim_address and not request.tx_hash:
         raise HTTPException(
             status_code=400,
@@ -741,7 +1021,7 @@ async def start_trace(request: TraceRequest):
     )
 
     return StreamingResponse(
-        run_trace_streaming(config),
+        run_trace_streaming(config, user_id=user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

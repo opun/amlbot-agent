@@ -2,10 +2,14 @@ import re
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 from agent.models import TracerConfig
 from agent.mcp_client import MCPClient
+from agent.mcp_http_client import MCPHTTPClient
 from agents import Agent, Runner
+
+# Type alias for client
+AnyMCPClient = Union[MCPClient, MCPHTTPClient]
 
 logger = logging.getLogger("theft_detection")
 
@@ -167,7 +171,7 @@ Return a JSON object with the extracted fields."""
 async def extract_victim_from_tx_hash(
     tx_hash: str,
     blockchain_name: str,
-    client: MCPClient
+    client: AnyMCPClient
 ) -> Tuple[str, int, Optional[str], Optional[int]]:
     """
     Extract victim address from a transaction hash using token-transfers.
@@ -217,7 +221,7 @@ async def extract_victim_from_tx_hash(
         logger.error(f"Error extracting victim from tx_hash {tx_hash}: {e}")
         raise ValueError(f"Failed to extract victim from transaction {tx_hash}: {e}")
 
-async def infer_asset_symbol(config: TracerConfig, client: MCPClient) -> Tuple[str, int]:
+async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> Tuple[str, int]:
     """
     Detect asset symbol and token_id.
     If provided in config, verify it exists.

@@ -27,6 +27,7 @@ from agent.theft_detection import (
     infer_approx_date_from_description,
     extract_victim_from_tx_hash
 )
+from agent.visualization import generate_visualization_payload
 class CryptoTracer:
     def __init__(self, client: MCPClient):
         self.client = client
@@ -152,5 +153,29 @@ class CryptoTracer:
         trace_result.case_meta = trace_result.case_meta or case_meta
         if not trace_result.case_meta.trace_id:
             trace_result.case_meta.trace_id = trace_id
+
+        # --- Visualization Generation & Saving ---
+        try:
+            logger.info("Generating visualization...")
+            viz_payload = generate_visualization_payload(trace_result)
+            
+            # Note: client.save_and_share_visualization has been added to MCPClient
+            viz_result = await self.client.save_and_share_visualization(viz_payload)
+
+            share_url = viz_result.get("share_url") or viz_result.get("data", {}).get("share_url") or viz_result.get("url")
+            # Also check if it's nested in result or output
+            if not share_url and "result" in viz_result:
+                share_url = viz_result["result"].get("share_url")
+            
+            if share_url:
+                logger.info(f"Visualization Link: {share_url}")
+                trace_result.visualization_url = share_url
+            else:
+                 # Try to construct it if we have an ID but no URL? 
+                 # Actually save_and_share tool should return it
+                 logger.warning(f"Visualization saved but no share URL found in result keys: {viz_result.keys()}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate visualization: {e}")
 
         return trace_result

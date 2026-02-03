@@ -72,6 +72,7 @@ class TraceResult(BaseModel):
     entities: List[Entity]
     annotations: List[Annotation]
     trace_stats: TraceStats
+    visualization_url: Optional[str] = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2, by_alias=True)

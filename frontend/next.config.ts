@@ -3,9 +3,18 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   async rewrites() {
     return [
+      // Proxy API routes to backend, but NOT /api/auth/* (NextAuth)
       {
-        source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        source: "/api/chat",
+        destination: "http://localhost:8000/api/chat",
+      },
+      {
+        source: "/api/trace",
+        destination: "http://localhost:8000/api/trace",
+      },
+      {
+        source: "/api/trace/:path*",
+        destination: "http://localhost:8000/api/trace/:path*",
       },
     ];
   },

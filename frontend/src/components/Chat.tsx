@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, FormEvent } from "react";
-import { Send, Loader2, ExternalLink, RotateCcw, CheckCircle2, AlertCircle, Edit3, ArrowRight, StopCircle, Hash } from "lucide-react";
+import { Send, Loader2, ExternalLink, RotateCcw, CheckCircle2, AlertCircle, Edit3, ArrowRight, StopCircle, Hash, LogOut } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { signOut, useSession } from "next-auth/react";
 
 interface ContinuationOption {
   address: string;
@@ -96,6 +97,7 @@ I can help you trace cryptocurrency fund movements across blockchains.
 `;
 
 export function Chat() {
+  const { data: session } = useSession();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome",
@@ -119,6 +121,13 @@ export function Chat() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Auto-focus textarea when loading completes
+  useEffect(() => {
+    if (!isLoading) {
+      inputRef.current?.focus();
+    }
+  }, [isLoading]);
 
   // Core message sending function - used by both form submit and quick actions
   const sendMessage = async (messageText: string, showAsUserMessage: boolean = true) => {
@@ -170,14 +179,19 @@ export function Chat() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
-      // Call backend directly to avoid Next.js proxy timeout issues
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/api/chat`, {
+      // Use local Next.js proxy to avoid CORS issues
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+
+      // Get userId from session
+      const userId = (session as any)?.userId;
+
+      const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           message: messageText,
           session_id: sessionId,
+          user_id: userId, // Pass userId in body instead of header
         }),
         signal: controller.signal,
       });
@@ -185,6 +199,11 @@ export function Chat() {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
+        // If unauthorized, user needs to login again
+        if (response.status === 401 || response.status === 403) {
+          signOut({ callbackUrl: "/login" });
+          return;
+        }
         throw new Error(`HTTP error: ${response.status}`);
       }
 
@@ -407,6 +426,10 @@ export function Chat() {
     setSessionId(null);
   };
 
+  const handleLogout = () => {
+    signOut({ callbackUrl: "/login" });
+  };
+
   return (
     <div className="flex flex-col h-screen max-w-4xl mx-auto">
       {/* Header */}
@@ -422,13 +445,22 @@ export function Chat() {
             </p>
           </div>
         </div>
-        <button
-          onClick={clearChat}
-          className="p-2 rounded-lg hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="New chat"
-        >
-          <RotateCcw className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={clearChat}
+            className="p-2 rounded-lg hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+            title="New chat"
+          >
+            <RotateCcw className="w-5 h-5" />
+          </button>
+          <button
+            onClick={handleLogout}
+            className="p-2 rounded-lg hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+            title="Logout"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
       {/* Messages */}

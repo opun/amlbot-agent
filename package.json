@@ -1,0 +1,16 @@
+{
+    "name": "amlbot-root",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "install:all": "npm install && cd frontend && npm install",
+        "dev:all": "concurrently \"PYTHONPATH=src .venv/bin/python -m agent.api\" \"cd ../mcp-server-amlbot && PYTHONPATH=src .venv/bin/python -m mcp_server_amlbot --http\" \"cd frontend && npm run dev -- -p 3333\"",
+        "dev": "concurrently \"PYTHONPATH=src .venv/bin/python -m agent.api\" \"cd frontend && npm run dev -- -p 3333\"",
+        "api": "PYTHONPATH=src .venv/bin/python -m agent.api",
+        "mcp-server": "cd ../mcp-server-amlbot && PYTHONPATH=src .venv/bin/python -m mcp_server_amlbot --http",
+        "frontend": "cd frontend && npm run dev -- -p 3333"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.0"
+    }
+}

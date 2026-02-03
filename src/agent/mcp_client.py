@@ -69,3 +69,15 @@ Return the tool output as-is."""
     async def token_transfers(self, tx_hash: str, blockchain_name: str) -> Dict[str, Any]:
         instruction = f'Use token-transfers with tx_hash="{tx_hash}", blockchain_name="{blockchain_name}"'
         return await self._execute(instruction)
+
+    async def save_and_share_visualization(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        payload_json = json.dumps(data.get("payload", {}))
+        helpers_json = json.dumps(data.get("helpers", {}))
+        extras_json = json.dumps(data.get("extras", {}))
+        
+        # Determine title and type with defaults
+        title = data.get("title", "Untitled Trace")
+        viz_type = data.get("type", "trace_graph")
+
+        instruction = f'Use save-visualization with title="{title}", type="{viz_type}", payload={payload_json}, helpers={helpers_json}, extras={extras_json}'
+        return await self._execute(instruction)

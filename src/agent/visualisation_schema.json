@@ -1,0 +1,475 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://example.com/schemas/visualization-data-server.schema.json",
+    "title": "VisualizationDataServerResponse",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["success", "data"],
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": { "$ref": "#/$defs/VisualizationDataServer" }
+    },
+    "$defs": {
+      "VisualizationDataServer": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["title", "type", "payload", "helpers"],
+        "properties": {
+          "title": { "type": "string" },
+          "type": { "type": "string" },
+
+          "createdAt": { "type": "number" },
+          "updatedAt": { "type": "number" },
+
+          "payload": { "$ref": "#/$defs/ViewData" },
+          "helpers": { "$ref": "#/$defs/ViewDataHelpers" },
+
+          "isFiatMode": { "type": "boolean" },
+
+          "extras": {
+            "type": "object",
+            "description": "extras?: { [key: string]: { [key: string]: UpdatedMistTrackInfo } }",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/UpdatedMistTrackInfo" }
+            }
+          }
+        }
+      },
+
+      "UpdatedMistTrackInfo": {
+        "type": "object",
+        "description": "Структура не задана в типах; оставлено расширяемым объектом.",
+        "additionalProperties": true
+      },
+
+      "ViewData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["comments", "connects", "items", "transform", "txs"],
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/CommentView" }
+          },
+          "connects": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "$ref": "#/$defs/ConnectView" },
+                { "$ref": "#/$defs/MergedConnectView" },
+                { "$ref": "#/$defs/SimpleConnectView" }
+              ]
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "$ref": "#/$defs/ItemAddress" },
+                { "$ref": "#/$defs/ItemEntity" },
+                { "$ref": "#/$defs/GenericItem" }
+              ]
+            }
+          },
+          "transform": { "$ref": "#/$defs/Transform" },
+          "txs": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "$ref": "#/$defs/TxView" },
+                { "$ref": "#/$defs/MergedTxItem" }
+              ]
+            }
+          }
+        }
+      },
+
+      "XYPosition": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        }
+      },
+
+      "Transform": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["k", "x", "y"],
+        "properties": {
+          "k": { "type": "number" },
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        }
+      },
+
+      "CommentView": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["author", "date", "descriptor", "text", "type", "width", "height", "isManuallyMoved", "x", "y"],
+        "properties": {
+          "author": { "type": "string" },
+          "date": { "type": "number" },
+          "descriptor": { "type": "string" },
+          "text": { "type": "string" },
+          "type": { "type": "string" },
+          "width": { "type": "number" },
+          "height": { "type": "number" },
+          "isManuallyMoved": { "type": "boolean" },
+          "typeOfComment": { "type": "string" },
+          "color": { "$ref": "#/$defs/ColorHex" },
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        }
+      },
+
+      "ColorHex": {
+        "type": "string",
+        "pattern": "^#[0-9A-Fa-f]{6}$"
+      },
+
+      "ConnectView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "target", "data"],
+        "properties": {
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "data": { "$ref": "#/$defs/ConnectData" }
+        }
+      },
+
+      "ConnectData": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["fiatRate"],
+        "properties": {
+          "currency": { "type": "string" },
+          "amount": { "type": ["number", "null"] },
+          "token_id": { "type": "number" },
+          "color": { "$ref": "#/$defs/ColorHex" },
+          "fiatRate": { "type": "number" },
+          "isNeedReverse": { "type": "boolean" },
+          "isNew": { "type": "boolean" }
+        }
+      },
+
+      "MergedConnectView": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "type", "source", "target", "data"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "const": "mergedEdge" },
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["input", "output"],
+            "properties": {
+              "input": { "type": ["string", "number"] },
+              "output": { "type": ["string", "number"] },
+              "color": { "$ref": "#/$defs/ColorHex" }
+            }
+          }
+        }
+      },
+
+      "SimpleConnectView": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["source", "target", "data"],
+        "properties": {
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "color": { "$ref": "#/$defs/ColorHex" },
+              "type": { "type": "string" }
+            }
+          }
+        }
+      },
+
+      "TxView": {
+        "allOf": [
+          { "$ref": "#/$defs/XYPosition" },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["currency", "descriptor", "hash", "token_id", "type"],
+            "properties": {
+              "currency": { "type": "string" },
+              "descriptor": { "type": "string" },
+              "hash": { "type": "string" },
+              "token_id": { "type": "number" },
+              "type": { "type": "string" },
+              "color": { "$ref": "#/$defs/ColorHex" },
+              "mergedList": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["input", "output"],
+                  "properties": {
+                    "input": { "type": ["string", "number"] },
+                    "output": { "type": ["string", "number"] }
+                  }
+                }
+              },
+              "parentNode": { "type": "string" },
+              "path": { "type": ["string", "null"] }
+            }
+          }
+        ]
+      },
+
+      "MergedTxItem": {
+        "allOf": [
+          { "$ref": "#/$defs/XYPosition" },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["descriptor", "hash", "type", "input", "output"],
+            "properties": {
+              "descriptor": { "type": "string" },
+              "hash": { "type": "string" },
+              "type": { "const": "mergedTx" },
+              "input": { "type": ["string", "number"] },
+              "output": { "type": ["string", "number"] }
+            }
+          }
+        ]
+      },
+
+      "PublicInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "twitter": { "type": "array", "items": { "type": "string" } },
+          "ens": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+
+      "ItemBase": {
+        "allOf": [
+          { "$ref": "#/$defs/XYPosition" },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["descriptor", "extend", "isManuallyMoved", "type"],
+            "properties": {
+              "descriptor": { "type": "string" },
+              "entry": { "type": "string" },
+              "label": { "type": "string" },
+              "parentId": { "type": "string" },
+              "parent": { "type": ["string", "null"] },
+              "isManuallyMoved": { "type": "boolean" },
+              "extent": { "type": ["string", "array", "null"] },
+              "type": { "type": "string" },
+              "extend": { "$ref": "#/$defs/Extend" }
+            }
+          }
+        ]
+      },
+
+      "Extend": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "currency": { "type": "string" },
+          "token_id": { "type": "number" },
+          "owner": { "type": ["object", "null"] },
+          "riskScore": { "type": "number" },
+          "type": { "type": "string" }
+        }
+      },
+
+      "ItemAddress": {
+        "allOf": [
+          { "$ref": "#/$defs/ItemBase" },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["address"],
+            "properties": {
+              "address": { "type": "string" },
+              "publicInfo": { "$ref": "#/$defs/PublicInfo" }
+            }
+          }
+        ]
+      },
+
+      "ItemEntity": {
+        "allOf": [
+          { "$ref": "#/$defs/ItemBase" },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["address"],
+            "properties": {
+              "address": { "type": "number" }
+            }
+          }
+        ]
+      },
+
+      "GenericItem": {
+        "type": "object",
+        "description": "Фоллбек для ItemView/CustomClusterItem, если структура отличается.",
+        "additionalProperties": true
+      },
+
+      "ViewDataHelpers": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "isConnectionBasedMode",
+          "interactionTxsStatsList",
+          "isFiatMode",
+          "isMergedTxMode",
+          "isHelperLinesDisabled",
+          "prevReportAddressData",
+          "labels",
+          "txList",
+          "currencyInfo",
+          "autoTxs",
+          "blockList",
+          "commentSettings"
+        ],
+        "properties": {
+          "isConnectionBasedMode": { "type": "boolean" },
+          "interactionTxsStatsList": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/TxsInteractionStats" }
+              }
+            }
+          },
+          "isFiatMode": { "type": "boolean" },
+          "isMergedTxMode": { "type": "boolean" },
+          "isHelperLinesDisabled": { "type": "boolean" },
+          "prevReportAddressData": { "type": ["object", "null"], "additionalProperties": true },
+
+          "labels": { "type": "array", "items": { "$ref": "#/$defs/Label" } },
+
+          "txList": { "type": "array", "items": { "$ref": "#/$defs/TransactionList" } },
+          "currencyInfo": { "type": "array", "items": { "$ref": "#/$defs/Token" } },
+
+          "autoTxs": { "type": "array", "items": { "$ref": "#/$defs/AutoTxsListVisualization" } },
+          "blockList": { "type": "array", "items": { "$ref": "#/$defs/BlockList" } },
+
+          "commentSettings": { "type": "object", "additionalProperties": true }
+        }
+      },
+
+      "TxsInteractionStats": {
+        "type": "object",
+        "description": "Структура не задана в предоставленных типах; расширяемый объект.",
+        "additionalProperties": true
+      },
+
+      "Label": {
+        "type": "object",
+        "description": "Структура Label не предоставлена; оставлено расширяемым объектом.",
+        "additionalProperties": true
+      },
+
+      "AutoTxsListVisualization": {
+        "type": "object",
+        "description": "Структура AutoTxsListVisualization не предоставлена; оставлено расширяемым объектом.",
+        "additionalProperties": true
+      },
+
+      "BlockList": {
+        "type": "object",
+        "description": "Структура BlockList не предоставлена; оставлено расширяемым объектом.",
+        "additionalProperties": true
+      },
+
+      "Token": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["currency", "name", "symbol", "token_id", "unit"],
+        "properties": {
+          "currency": { "type": "string" },
+          "issuer": { "type": ["string", "null"] },
+          "name": { "type": "string" },
+          "symbol": { "type": "string" },
+          "token_id": { "type": "number" },
+          "unit": { "type": "number" }
+        }
+      },
+
+      "TransactionList": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["inputs", "outputs", "hash", "addressesCount", "amount", "fiatRate", "currency", "tokenId", "date", "type"],
+        "properties": {
+          "inputs": { "type": "array", "items": { "$ref": "#/$defs/ProcessedAddressEntity" } },
+          "outputs": { "type": "array", "items": { "$ref": "#/$defs/ProcessedAddressEntity" } },
+          "hash": { "type": "string" },
+          "addressesCount": { "type": "number" },
+          "amount": { "type": "number" },
+          "fiatRate": { "type": "number" },
+          "fee": { "type": "number" },
+          "currency": { "type": "string" },
+          "tokenId": { "type": "number" },
+          "path": { "type": ["string", "null"] },
+          "date": { "type": "number" },
+          "poolTime": { "type": "number" },
+          "type": { "type": "string" }
+        }
+      },
+
+      "ProcessedAddressEntity": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["address", "riskscore"],
+        "properties": {
+          "address": { "type": "string" },
+          "riskscore": { "type": "number" },
+          "type": { "type": "string" },
+          "owner": { "$ref": "#/$defs/Owner" },
+
+          "addresses": {
+            "description": "В TS это Set<string>, в JSON это будет массив строк.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+
+          "amount": { "type": "number" },
+          "next": { "type": "string" },
+          "pos": { "type": "number" },
+          "count": { "type": "number" }
+        }
+      },
+
+      "Owner": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id"],
+        "properties": {
+          "global_id": { "type": "number" },
+          "first_activity": { "type": "number" },
+          "id": { "type": "number" },
+          "name": { "type": "string" },
+          "last_activity": { "type": "number" },
+          "size": { "type": "number" },
+          "status": { "type": "string" },
+          "slug": { "type": "string" },
+          "subtype": { "type": ["string", "null"] },
+          "type": { "type": "string" }
+        }
+      }
+    }
+  }

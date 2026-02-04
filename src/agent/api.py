@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import uuid
+import time
 from typing import Optional, AsyncGenerator, Dict, Any, List
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -25,12 +26,11 @@ from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
 from agent.models import TracerConfig, TraceResult
 from agent.mcp_client import MCPClient
-from agent.mcp_http_client import MCPHTTPClient, VisualizationAPIClient
-from agent.tracer import CryptoTracer
-from agent.http_tracer import HTTPCryptoTracer
+from agent.mcp_http_client import MCPHTTPClient
+from agent.mcp_tracer import MCPTracer
+from agent.http_tracer import HTTPTracer
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
-from agent.visualization import generate_visualization_payload
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -390,59 +390,65 @@ async def _run_trace_http(
     mcp_server_url: str
 ) -> AsyncGenerator[str, None]:
     """Run trace using HTTP MCP server."""
-    import uuid
-
-    trace_id = f"http-{uuid.uuid4().hex[:12]}"
+    trace_id = gen_trace_id()
+    trace_url = f"https://platform.openai.com/traces/trace?trace_id={trace_id}"
+    logger.info(f"Trace URL: {trace_url}")
+    logger.info("Streaming event: trace_started")
     yield json.dumps({
         "type": "trace_started",
         "trace_id": trace_id,
-        "trace_url": None  # No OpenAI trace URL for HTTP mode
+        "trace_url": trace_url
     }) + "\n"
 
     http_client = MCPHTTPClient(mcp_server_url, user_id)
     viz_client = None
 
     try:
-        tracer = HTTPCryptoTracer(http_client)
+        with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+            tracer = HTTPTracer(http_client)
+            progress_queue = asyncio.Queue()
 
-        yield json.dumps({"type": "status", "message": "Running trace analysis..."}) + "\n"
+            async def on_progress(message: str):
+                await progress_queue.put(message)
 
-        try:
-            result = await tracer.trace(config)
+            # Start trace in background
+            trace_task = asyncio.create_task(tracer.trace(config, on_progress=on_progress))
+            last_status_ts = time.time()
 
-            yield json.dumps({"type": "status", "message": "Building report..."}) + "\n"
-            report = build_report(result)
-
-            # Generate visualization JSON
-            yield json.dumps({"type": "status", "message": "Generating visualization..."}) + "\n"
-            visualization_data = generate_visualization_payload(
-                result,
-                title=f"Trace: {config.victim_address or config.tx_hash}"
-            )
-
-            # Save and share visualization
-            share_url = None
-            visualization_id = None
-            viz_api_url = os.getenv("NEXT_PUBLIC_API_URL")
-
-            if viz_api_url:
+            # Stream progress until trace is done
+            while not trace_task.done():
                 try:
-                    yield json.dumps({"type": "status", "message": "Saving visualization..."}) + "\n"
-                    viz_client = VisualizationAPIClient(viz_api_url, user_id)
+                    # Check for progress updates with a short timeout
+                    msg = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                    logger.info("Streaming event: status")
+                    yield json.dumps({"type": "status", "message": msg}) + "\n"
+                    last_status_ts = time.time()
+                except asyncio.TimeoutError:
+                    if time.time() - last_status_ts > 15:
+                        logger.info("Streaming event: status (keepalive)")
+                        yield json.dumps({"type": "status", "message": "Still analyzing..."} ) + "\n"
+                        last_status_ts = time.time()
+                    continue
 
-                    share_result = await viz_client.save_and_share(visualization_data)
-                    visualization_id = share_result.get("visualization_id")
-                    share_url = share_result.get("share_url")
+            logger.info("Trace task done=%s cancelled=%s", trace_task.done(), trace_task.cancelled())
+            # Get final result
+            result = await trace_task
+            logger.info("Trace task completed, building report next")
 
-                    logger.info(f"Visualization saved with ID: {visualization_id}, share URL: {share_url}")
-                except Exception as viz_error:
-                    logger.warning(f"Failed to save/share visualization: {viz_error}")
-                    # Don't fail the whole trace if visualization fails
-            else:
-                logger.warning("NEXT_PUBLIC_API_URL not set, skipping visualization save/share")
+            # Align trace_id with OpenAI dashboard link
+            if result.case_meta:
+                result.case_meta.trace_id = trace_id
+
+            logger.info("Streaming event: status (building_report)")
+            yield json.dumps({"type": "status", "message": "Building report..."}) + "\n"
+            logger.info("Building report start")
+            report = build_report(result)
+            logger.info("Building report done")
 
             # Extract continuation options using HTTP client
+            logger.info("Extracting continuation options start")
             continuation_options = await _extract_continuation_options_http(result, http_client, config)
+            logger.info("Extracting continuation options done: %d", len(continuation_options))
 
             # Store trace result in session for continuation
             if session:
@@ -457,14 +463,9 @@ async def _run_trace_http(
                 "type": "result",
                 "report": report,
                 "trace_id": trace_id,
-                "visualization": visualization_data.get("data"),  # Include visualization data
+                "trace_url": trace_url,
             }
-
-            # Add visualization share info if available
-            if visualization_id:
-                response_data["visualization_id"] = visualization_id
-            if share_url:
-                response_data["visualization_url"] = share_url
+            logger.info("Trace result ready: report_keys=%s", list(report.keys()) if isinstance(report, dict) else "non-dict")
 
             if continuation_options:
                 response_data["continuation_options"] = continuation_options
@@ -472,14 +473,19 @@ async def _run_trace_http(
             else:
                 response_data["can_continue"] = False
 
+            logger.info("Streaming event: result")
             yield json.dumps(response_data) + "\n"
 
-        except Exception as e:
-            logger.error(f"Trace error: {e}")
-            yield json.dumps({
-                "type": "error",
-                "message": str(e)
-            }) + "\n"
+    except asyncio.CancelledError:
+        logger.warning("Trace stream cancelled by client")
+        raise
+    except Exception as e:
+        logger.error(f"Trace error: {e}")
+        logger.info("Streaming event: error")
+        yield json.dumps({
+            "type": "error",
+            "message": str(e)
+        }) + "\n"
 
     finally:
         await http_client.aclose()
@@ -494,10 +500,12 @@ async def _run_trace_stdio(
 ) -> AsyncGenerator[str, None]:
     """Run trace using stdio MCP server (Docker)."""
     trace_id = gen_trace_id()
+    trace_url = f"https://platform.openai.com/traces/trace?trace_id={trace_id}"
+    logger.info(f"Trace URL: {trace_url}")
     yield json.dumps({
         "type": "trace_started",
         "trace_id": trace_id,
-        "trace_url": f"https://platform.openai.com/traces/trace?trace_id={trace_id}"
+        "trace_url": trace_url
     }) + "\n"
 
     viz_client = None
@@ -512,43 +520,44 @@ async def _run_trace_stdio(
             client_session_timeout_seconds=300.0,
         ) as server:
             client = MCPClient(server)
-            tracer = CryptoTracer(client)
+            tracer = MCPTracer(client)
+            progress_queue = asyncio.Queue()
 
+            async def on_progress(message: str):
+                await progress_queue.put(message)
+
+            logger.info("Streaming event: status (running_trace)")
             yield json.dumps({"type": "status", "message": "Running trace analysis..."}) + "\n"
+            last_status_ts = time.time()
 
             try:
-                result = await tracer.trace(config)
+                # Start trace in background
+                trace_task = asyncio.create_task(tracer.trace(config, on_progress=on_progress))
 
+                # Stream progress until trace is done
+                while not trace_task.done():
+                    try:
+                        msg = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                        logger.info("Streaming event: status")
+                        yield json.dumps({"type": "status", "message": msg}) + "\n"
+                        last_status_ts = time.time()
+                    except asyncio.TimeoutError:
+                        if time.time() - last_status_ts > 15:
+                            logger.info("Streaming event: status (keepalive)")
+                            yield json.dumps({"type": "status", "message": "Still analyzing..."} ) + "\n"
+                            last_status_ts = time.time()
+                        continue
+
+                # Get final result
+                result = await trace_task
+
+                # Align trace_id with OpenAI dashboard link
+                if result.case_meta:
+                    result.case_meta.trace_id = trace_id
+
+                logger.info("Streaming event: status (building_report)")
                 yield json.dumps({"type": "status", "message": "Building report..."}) + "\n"
                 report = build_report(result)
-
-                # Generate visualization JSON
-                yield json.dumps({"type": "status", "message": "Generating visualization..."}) + "\n"
-                visualization_data = generate_visualization_payload(
-                    result,
-                    title=f"Trace: {config.victim_address or config.tx_hash}"
-                )
-
-                # Save and share visualization
-                share_url = None
-                visualization_id = None
-                viz_api_url = os.getenv("NEXT_PUBLIC_API_URL")
-
-                if viz_api_url:
-                    try:
-                        yield json.dumps({"type": "status", "message": "Saving visualization..."}) + "\n"
-                        viz_client = VisualizationAPIClient(viz_api_url, user_id)
-
-                        share_result = await viz_client.save_and_share(visualization_data)
-                        visualization_id = share_result.get("visualization_id")
-                        share_url = share_result.get("share_url")
-
-                        logger.info(f"Visualization saved with ID: {visualization_id}, share URL: {share_url}")
-                    except Exception as viz_error:
-                        logger.warning(f"Failed to save/share visualization: {viz_error}")
-                        # Don't fail the whole trace if visualization fails
-                else:
-                    logger.warning("NEXT_PUBLIC_API_URL not set, skipping visualization save/share")
 
                 # Extract continuation options - only when user decision is needed
                 continuation_options = await extract_continuation_options(result, client, config)
@@ -567,14 +576,9 @@ async def _run_trace_stdio(
                     "type": "result",
                     "report": report,
                     "trace_id": trace_id,
-                    "visualization": visualization_data.get("data"),  # Include visualization data
+                    "trace_url": trace_url,
                 }
-
-                # Add visualization share info if available
-                if visualization_id:
-                    response_data["visualization_id"] = visualization_id
-                if share_url:
-                    response_data["visualization_url"] = share_url
+                logger.info("Trace result ready: report_keys=%s", list(report.keys()) if isinstance(report, dict) else "non-dict")
 
                 if continuation_options:
                     response_data["continuation_options"] = continuation_options
@@ -582,8 +586,11 @@ async def _run_trace_stdio(
                 else:
                     response_data["can_continue"] = False
 
+                logger.info("Streaming event: result")
                 yield json.dumps(response_data) + "\n"
-
+            except asyncio.CancelledError:
+                logger.warning("Trace stream cancelled by client")
+                raise
             except Exception as e:
                 logger.error(f"Trace error: {e}")
                 yield json.dumps({
@@ -627,8 +634,9 @@ async def _extract_continuation_options_http(
         )
 
         is_bridge = entity and entity.role == "bridge_service"
+        is_cex = entity and entity.role == "cex_deposit"
 
-        if is_bridge or needs_user_decision:
+        if is_bridge or is_cex or needs_user_decision:
             option = {
                 "address": last_address,
                 "path_id": path.path_id,
@@ -645,7 +653,10 @@ async def _extract_continuation_options_http(
             if is_bridge and last_step.tx_hash:
                 try:
                     logger.info(f"Analyzing bridge tx: {last_step.tx_hash} on {last_step.chain}")
-                    bridge_info = await client.bridge_analyze(last_step.chain, last_step.tx_hash)
+                    bridge_info = await asyncio.wait_for(
+                        client.bridge_analyze(last_step.chain, last_step.tx_hash),
+                        timeout=10.0
+                    )
 
                     if bridge_info and bridge_info.get("is_bridge"):
                         dst_chain = bridge_info.get("dst_chain")
@@ -718,7 +729,7 @@ async def extract_continuation_options(
         is_cex = entity and entity.role == "cex_deposit"
 
         # Only offer continuation for bridges (cross-chain) or when explicitly needed
-        if is_bridge or needs_user_decision:
+        if is_bridge or is_cex or needs_user_decision:
             option = {
                 "address": last_address,
                 "path_id": path.path_id,

@@ -8,7 +8,7 @@ from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
 from agent.models import TracerConfig
 from agent.mcp_client import MCPClient
-from agent.tracer import CryptoTracer
+from agent.mcp_tracer import MCPTracer
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
 
@@ -56,7 +56,7 @@ async def run_trace(
 
         with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
             client = MCPClient(server)
-            tracer = CryptoTracer(client)
+            tracer = MCPTracer(client)
 
             # Parse case description with LLM if provided
             parsed_info = {}

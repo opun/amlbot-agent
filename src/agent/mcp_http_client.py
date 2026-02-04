@@ -244,6 +244,19 @@ class MCPHTTPClient:
             "blockchain_name": blockchain_name
         })
 
+    async def get_position(
+        self, address: str, tx_hash: str,
+        blockchain_name: str, token_id: int = 0, path: str = "0"
+    ) -> Dict[str, Any]:
+        """Get position information for transaction tracing."""
+        return await self.call_tool("get-position", {
+            "address": address,
+            "tx_hash": tx_hash,
+            "blockchain_name": blockchain_name,
+            "token_id": token_id,
+            "path": path
+        })
+
     async def bridge_analyzer(self, chain: str, tx_hash: str) -> Dict[str, Any]:
         """Alias for bridge_analyze for compatibility."""
         return await self.bridge_analyze(chain, tx_hash)

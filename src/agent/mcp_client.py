@@ -59,7 +59,15 @@ Return the tool output as-is."""
         return await self._execute(instruction)
 
     async def bridge_analyzer(self, chain: str, tx_hash: str) -> Dict[str, Any]:
-        instruction = f'Use bridge-analyzer with chain="{chain}", tx_hash="{tx_hash}"'
+        """Alias for bridge_analyze."""
+        return await self.bridge_analyze(chain, tx_hash)
+
+    async def bridge_analyze(self, chain: str, tx_hash: str) -> Dict[str, Any]:
+        instruction = f'Use bridge-analyze with chain="{chain}", tx_hash="{tx_hash}"'
+        return await self._execute(instruction)
+
+    async def get_position(self, address: str, tx_hash: str, blockchain_name: str, token_id: int = 0, path: str = "0") -> Dict[str, Any]:
+        instruction = f'Use get-position with address="{address}", tx_hash="{tx_hash}", blockchain_name="{blockchain_name}", token_id={token_id}, path="{path}"'
         return await self._execute(instruction)
 
     async def expert_search(self, hash: str, filter: str = "explorer") -> Dict[str, Any]:

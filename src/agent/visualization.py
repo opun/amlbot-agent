@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 import uuid
 import logging
 from collections import defaultdict, deque
+from datetime import datetime
 from agent.models import TraceResult, Entity, Step, TraceStats
 
 logger = logging.getLogger(__name__)
@@ -10,6 +11,24 @@ def _get_descriptor(address: str, chain: str, token_id: int = 0) -> str:
     """Generate a descriptor string for nodes/edges."""
     # Standard address descriptor
     return f"{address}-{chain}-{token_id}"
+
+def _get_timestamp(t: Any) -> int:
+    if hasattr(t, 'timestamp'): 
+        return int(t.timestamp())
+    if isinstance(t, (int, float)): 
+        return int(t)
+    if isinstance(t, str):
+        # Try numeric string
+        try:
+            return int(float(t))
+        except Exception:
+            pass
+        # Try ISO date/time
+        try:
+            return int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp())
+        except Exception:
+            return 0
+    return 0
 
 def _is_service(entity: Optional[Entity]) -> bool:
     """Check if entity should be visualized as a service comment block."""
@@ -98,11 +117,35 @@ def _compute_positions(nodes: Set[str], edges: List[Tuple[str, str]], victim_add
             
     return positions
 
+def _get_token_id(asset: str, chain: str) -> int:
+    """
+    Generate a deterministic token ID for the asset.
+    Returns 0 for native assets, and a hash-based ID for tokens.
+    """
+    if not asset:
+        return 0
+        
+    asset_upper = asset.upper()
+    chain_upper = chain.upper()
+    
+    if asset_upper == chain_upper or asset_upper in ["ETH", "BTC", "TRX", "SOL", "MATIC", "BNB"]:
+         return 0
+    
+    # Common known tokens adjustments
+    if chain_upper == "TRX" and asset_upper == "USDT":
+        return 9
+         
+    return abs(hash(f"{chain}:{asset}")) % 1000 + 1
+
 def generate_visualization_payload(trace_result: TraceResult, title: Optional[str] = None) -> Dict[str, Any]:
     """
     Generate visualization payload from TraceResult.
     Format matches the expected structure (corrected.json).
     """
+    import time
+    
+    logger.info("🔧 Starting visualization payload generation...")
+    logger.debug(f"Case ID: {trace_result.case_meta.case_id}, Victim: {trace_result.case_meta.victim_address}")
     
     # 1. Prepare data structures
     items = []
@@ -110,7 +153,7 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     txs = []
     comments = []
     currency_info = {}
-    tx_list = []
+    tx_list_inputs = [] # Use separate list for helpers.txList
     
     address_to_entity = {e.address: e for e in trace_result.entities}
     
@@ -131,37 +174,46 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     
     def get_node_descriptor(address: str, chain: str, token_id: int) -> str:
         if address in service_address_map:
-            # We want to use the same descriptor for the same address/chain combo?
-            # Service map is address -> descriptor. 
             return service_address_map[address]
         return _get_descriptor(address, chain, token_id)
 
+    # We need to collect all steps to build graph
+    all_steps = []
     for path in trace_result.paths:
-        for step in path.steps:
-            key = (step.chain, step.asset)
-            if key not in token_id_map:
-                token_id_map[key] = _get_token_id(step.asset, step.chain)
+        all_steps.extend(path.steps)
+
+    for step in all_steps:
+        key = (step.chain, step.asset)
+        if key not in token_id_map:
+            token_id_map[key] = _get_token_id(step.asset, step.chain)
+        
+        token_id = token_id_map[key]
+        
+        src = get_node_descriptor(step.from_address, step.chain, token_id)
+        dst = get_node_descriptor(step.to_address, step.chain, token_id)
+        
+        node_descriptors.add(src)
+        node_descriptors.add(dst)
+        edges.append((src, dst))
+        
+        # Accumulate weight
+        val = step.amount_estimate or 0.0
+        node_weights[src] += val
+        node_weights[dst] += val
             
-            token_id = token_id_map[key]
-            
-            src = get_node_descriptor(step.from_address, step.chain, token_id)
-            dst = get_node_descriptor(step.to_address, step.chain, token_id)
-            
-            node_descriptors.add(src)
-            node_descriptors.add(dst)
-            edges.append((src, dst))
-            
-            # Accumulate weight
-            # We treat amount valid if > 0
-            val = step.amount_estimate or 0.0
-            node_weights[src] += val
-            node_weights[dst] += val
-            
+    # Log graph topology
+    logger.info(f"📊 Graph topology: {len(node_descriptors)} nodes, {len(edges)} edges")
+    logger.debug(f"Nodes: {list(node_descriptors)}")
+    logger.debug(f"Token ID Map: {token_id_map}")
+    
     # --- Pass 2: Compute Layout ---
     positions = _compute_positions(node_descriptors, edges, trace_result.case_meta.victim_address, service_descriptors, node_weights)
 
     # --- Pass 3: Generate Items & Comments ---
     added_descriptors = set()
+    
+    # Track addresses per chain/token for autoTxs grouping if needed, 
+    # but autoTxs is per-address.
     
     def add_node_or_comment(address: str, chain: str, token_id: int):
         descriptor = get_node_descriptor(address, chain, token_id)
@@ -177,16 +229,16 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
                 label = entity.labels[0]
             elif entity and entity.role:
                 label = entity.role.replace("_", " ").title()
-                
+            
             comments.append({
-                "author": "System",
-                "date": 1764320753, 
+                "author": "User", 
+                "date": time.time(),
                 "descriptor": descriptor,
                 "text": label,
                 "type": "comment",
                 "width": 126,
-                "height": 50,
-                "isManuallyMoved": False,
+                "height": 50, 
+                "isManuallyMoved": True,
                 "typeOfComment": "comment",
                 "color": "#77869E",
                 "x": pos["x"],
@@ -199,7 +251,7 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
                  owner = {
                      "id": 0,
                      "name": entity.labels[0],
-                     "slug": entity.labels[0],
+                     "slug": entity.labels[0], 
                      "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
                      "subtype": None
                  }
@@ -217,84 +269,119 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
                     "type": "address"
                 },
                 "type": "address",
-                "isManuallyMoved": False 
+                "isManuallyMoved": True
             })
         added_descriptors.add(descriptor)
 
+    # --- Pre-fill Currency Info with Native ---
+    # Ensure native TRX/ETH is present
+    blockchain = trace_result.case_meta.blockchain_name
+    if blockchain == "trx":
+         currency_info[0] = {
+            "currency": "trx",
+            "issuer": None,
+            "name": "TRON",
+            "symbol": "trx",
+            "token_id": 0,
+            "unit": 6
+         }
+
     # --- Pass 4: Generate Edges & Txs ---
-    for path in trace_result.paths:
-        for i_step, step in enumerate(path.steps):
-            chain = step.chain
-            token_id = token_id_map.get((chain, step.asset), 0)
+    # Prepare for autoTxs: map address -> list of (step_index, type, hash, path)
+    address_activity = defaultdict(list)
+
+    for i_step, step in enumerate(all_steps):
+        chain = step.chain
+        token_id = token_id_map.get((chain, step.asset), 0)
+        
+        src_desc = get_node_descriptor(step.from_address, chain, token_id)
+        tgt_desc = get_node_descriptor(step.to_address, chain, token_id)
+        
+        add_node_or_comment(step.from_address, chain, token_id)
+        add_node_or_comment(step.to_address, chain, token_id)
+        
+        is_service_connection = (src_desc in service_descriptors) or (tgt_desc in service_descriptors)
+        
+        src_pos = positions.get(src_desc, {"x": 0, "y": 0})
+        tgt_pos = positions.get(tgt_desc, {"x": 0, "y": 0})
+        
+        # Basic edge color
+        edge_color = "#EC292C" 
+        
+        if is_service_connection:
+            connects.append({
+                "source": src_desc,
+                "target": tgt_desc,
+                "data": {
+                    "color": "#C2C6CE", 
+                    "type": "smoothstep",
+                    "hovered": False
+                }
+            })
+        else:
+            connects.append({
+                "source": src_desc,
+                "target": tgt_desc,
+                "data": {
+                    "currency": chain,
+                    "amount": step.amount_estimate,
+                    "fiatRate": 1.0, 
+                    "token_id": token_id,
+                    "color": edge_color,
+                    "isNew": True,
+                    "isNeedReverse": False,
+                    "hovered": False
+                }
+            })
             
-            src_desc = get_node_descriptor(step.from_address, chain, token_id)
-            tgt_desc = get_node_descriptor(step.to_address, chain, token_id)
+            tx_hash = step.tx_hash or f"tx-{uuid.uuid4().hex}"
+            tx_desc = f"{tx_hash}-{chain}-{token_id}-{i_step}"
             
-            add_node_or_comment(step.from_address, chain, token_id)
-            add_node_or_comment(step.to_address, chain, token_id)
-            
-            is_service_connection = (src_desc in service_descriptors) or (tgt_desc in service_descriptors)
-            
-            src_pos = positions.get(src_desc, {"x": 0, "y": 0})
-            tgt_pos = positions.get(tgt_desc, {"x": 0, "y": 0})
             mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
             mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
             y_offset = -40 if i_step % 2 == 0 else 40
+            if src_desc == tgt_desc: y_offset = 0
             
-            if is_service_connection:
-                connects.append({
-                    "source": src_desc,
-                    "target": tgt_desc,
-                    "data": {
-                        "color": "#29793F",
-                        "type": "smoothstep",
-                        "hovered": False
-                    }
-                })
-            else:
-                connects.append({
-                    "source": src_desc,
-                    "target": tgt_desc,
-                    "data": {
-                        "currency": chain,
-                        "amount": step.amount_estimate,
-                        "token_id": token_id,
-                        "color": "#EC292C",
-                        "isNew": True,
-                        "fiatRate": 1.0, 
-                        "isNeedReverse": False,
-                        "hovered": False
-                    }
-                })
-                
-                tx_hash = step.tx_hash or f"tx-{uuid.uuid4().hex}"
-                tx_desc = f"{tx_hash}-{chain}-{token_id}-{i_step}"
-                
-                txs.append({
-                    "currency": chain,
-                    "descriptor": tx_desc,
-                    "hash": step.tx_hash,
-                    "token_id": token_id,
-                    "x": mid_x, 
-                    "y": mid_y + y_offset,
-                    "color": "#EC292C",
-                    "path": "0",
-                    "parentNode": f"{src_desc}{tgt_desc}", 
-                    "type": "txEth"
-                })
-                
-            # Rich metadata for TxList
-            tx_list.append({
-                "inputs": [{"address": step.from_address, "riskscore": 0.0}], 
-                "outputs": [{"address": step.to_address, "riskscore": 0.0}],
+            txs.append({
+                "currency": chain,
+                "descriptor": tx_desc,
+                "hash": step.tx_hash,
+                "token_id": token_id,
+                "x": mid_x, 
+                "y": mid_y + y_offset,
+                "color": edge_color,
+                "path": "0", 
+                "type": "txEth"
+            })
+            
+            # Record activity for autoTxs
+            # For Sender (OUT)
+            address_activity[(step.from_address, chain, token_id)].append({
+                "type": "out", 
+                "hash": step.tx_hash, 
+                "index": i_step,
+                "path": "0" 
+            })
+            # For Receiver (IN)
+            address_activity[(step.to_address, chain, token_id)].append({
+                 "type": "in",
+                 "hash": step.tx_hash,
+                 "index": i_step,
+                 "path": "0"
+            })
+
+            # Populate helper txList
+            tx_list_inputs.append({
+                "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}], 
+                "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "hash": step.tx_hash,
                 "fiatRate": 1.0,
                 "addressesCount": 2,
-                "amount": step.amount_estimate,
+                "amount": int((step.amount_estimate or 0) * 1e6) if chain == 'trx' else step.amount_estimate, 
                 "currency": chain,
                 "tokenId": token_id,
-                "poolTime": int(step.time.timestamp()) if hasattr(step.time, 'timestamp') else 0,
-                "date": int(step.time.timestamp()) if hasattr(step.time, 'timestamp') else 0,
+                "poolTime": _get_timestamp(step.time),
+                "date": _get_timestamp(step.time),
                 "path": "0",
                 "type": "txEth",
                 # Extra metadata for UI
@@ -303,16 +390,54 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
                 "service_label": step.service_label,
                 "direction": step.direction
             })
+        
+        if token_id not in currency_info:
+            currency_info[token_id] = {
+                "currency": chain,
+                "issuer": None, 
+                "name": "Tether USD" if token_id == 9 else step.asset,
+                "symbol": "USDT" if token_id == 9 else step.asset,
+                "token_id": token_id,
+                "unit": 6 
+            }
+
+    # --- Generate autoTxs ---
+    auto_txs = []
+    
+    for (address, chain, token_id), activities in address_activity.items():
+        if address in service_address_map: continue # Skip service nodes for autoTxs?
+        
+        # Sort by step index
+        activities.sort(key=lambda x: x["index"])
+        
+        for i, act in enumerate(activities):
+            data_block = {}
             
-            if chain not in currency_info:
-                currency_info[chain] = {
-                    "currency": chain,
-                    "issuer": None,
-                    "name": step.asset,
-                    "symbol": step.asset,
-                    "token_id": token_id,
-                    "unit": 6 
+            # Link Next
+            if i < len(activities) - 1:
+                next_act = activities[i+1]
+                data_block["next_" + next_act["type"]] = {
+                    "hash": next_act["hash"],
+                    "path": next_act["path"]
                 }
+            
+            # Link Prev
+            if i > 0:
+                prev_act = activities[i-1]
+                data_block["prev_" + prev_act["type"]] = {
+                    "hash": prev_act["hash"],
+                    "path": prev_act["path"]
+                }
+                
+            # Offset? (Random or calculated)
+            data_block["offset"] = (i + 1) * 100 # Dummy offset
+            
+            auto_txs.append({
+                "address": address,
+                "currency": chain,
+                "token_id": token_id,
+                "data": data_block
+            })
 
     payload = {
         "comments": comments,
@@ -322,36 +447,44 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
         "txs": txs
     }
     
+    # Hardcoded helpers from example
     helpers = {
-        "currencyInfo": list(currency_info.values()),
-        "txList": tx_list
+        "isConnectionBasedMode": False,
+        "isMergedTxMode": False,
+        "isFiatMode": False,
+        "isShowDate": False,
+        "isHelperLinesDisabled": False,
+        "labels": [],
+        "blockList": [],
+        "autoTxs": auto_txs,
+        "interactionTxsStatsList": {},
+        "commentSettings": {
+            "defaultType": "comment",
+            "defaultLineType": "smoothstep",
+            "defaultCommentColor": "#77869E",
+            "defaultTxCommentColor": "#C2C6CE",
+            "defaultSymbol": "$"
+        },
+        "prevReportAddressData": None,
+        "txList": tx_list_inputs,
+        "currencyInfo": list(currency_info.values())
     }
     
     default_title = f"Trace: {trace_result.case_meta.description[:30]}..." if trace_result.case_meta.description else f"Trace {trace_result.case_meta.case_id}"
     
+    # Final summary logging
+    logger.info(f"✅ Visualization built: {len(items)} items, {len(connects)} connections, {len(txs)} transactions")
+    logger.info(f"📦 Currencies: {[c['symbol'] for c in currency_info.values()]}")
+    logger.debug(f"Currency Info: {list(currency_info.values())}")
+    logger.debug(f"AutoTxs count: {len(auto_txs)}")
+    
     return {
+        "createdAt": int(time.time() * 1000),
         "title": title or default_title,
         "type": "address",
-        "extras": {
-             "trace_id": trace_result.case_meta.trace_id,
-             "victim_address": trace_result.case_meta.victim_address
-        },
+        "thumbnail": "",
+        "hash": None,
+        "extras": {},
         "payload": payload,
         "helpers": helpers
     }
-
-def _get_token_id(asset: str, chain: str) -> int:
-    """
-    Generate a deterministic token ID for the asset.
-    Returns 0 for native assets, and a hash-based ID for tokens.
-    """
-    if not asset:
-        return 0
-        
-    asset_upper = asset.upper()
-    chain_upper = chain.upper()
-    
-    if asset_upper == chain_upper or asset_upper in ["ETH", "BTC", "TRX", "SOL", "MATIC", "BNB"]:
-         return 0
-         
-    return abs(hash(f"{chain}:{asset}")) % 1000 + 1

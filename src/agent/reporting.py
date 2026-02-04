@@ -169,20 +169,21 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
     mermaid.append("    classDef unknown fill:#d1d5db,stroke:#4b5563,stroke-width:2px,color:#111827,font-weight:600")
 
     # Nodes - use simple counter-based IDs to avoid any special character issues
-    added_nodes = {}  # address -> node_id mapping
+    added_nodes = {}  # (address, chain) -> node_id mapping
     node_counter = 0
 
     # Define a helper to get or create a valid node id
     # Mermaid node IDs must start with a letter and only contain alphanumeric + underscore
-    def get_node_id(addr):
-        if addr in added_nodes:
-            return added_nodes[addr]
+    def get_node_id(addr, chain):
+        key = f"{addr}-{chain}"
+        if key in added_nodes:
+            return added_nodes[key]
 
         nonlocal node_counter
         # Use simple counter-based ID to ensure it's always valid
         node_id = f"N{node_counter}"
         node_counter += 1
-        added_nodes[addr] = node_id
+        added_nodes[key] = node_id
         return node_id
 
     # Helper to escape label text for Mermaid
@@ -191,10 +192,11 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
         return text.replace('"', '&quot;').replace('\n', '<br/>')
 
     for entity in trace_result.entities:
-        if entity.address in added_nodes:
+        key = f"{entity.address}-{entity.chain}"
+        if key in added_nodes:
             continue
 
-        node_id = get_node_id(entity.address)
+        node_id = get_node_id(entity.address, entity.chain)
         label = f"{entity.address[:6]}...{entity.address[-4:]}"
 
         # Add risk score if high
@@ -222,14 +224,14 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
     # Edges (Transactions)
     for path in trace_result.paths:
         for step in path.steps:
-            src_id = get_node_id(step.from_address)
-            dst_id = get_node_id(step.to_address)
+            src_id = get_node_id(step.from_address, step.chain)
+            dst_id = get_node_id(step.to_address, step.chain)
 
             # Ensure nodes exist (if not in entities list for some reason)
-            if step.from_address not in added_nodes:
+            if f"{step.from_address}-{step.chain}" not in added_nodes:
                 label = escape_label(f"{step.from_address[:6]}...")
                 mermaid.append(f'    {src_id}("{label}"):::unknown')
-            if step.to_address not in added_nodes:
+            if f"{step.to_address}-{step.chain}" not in added_nodes:
                 label = escape_label(f"{step.to_address[:6]}...")
                 mermaid.append(f'    {dst_id}("{label}"):::unknown')
 

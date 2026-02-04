@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple, Dict, Any, Union
 from agent.models import TracerConfig
 from agent.mcp_client import MCPClient
 from agent.mcp_http_client import MCPHTTPClient
-from agents import Agent, Runner
+from agents import Agent, Runner, function_span
 
 # Type alias for client
 AnyMCPClient = Union[MCPClient, MCPHTTPClient]
@@ -42,7 +42,22 @@ def infer_approx_date_from_description(description: str) -> Optional[str]:
         match = re.search(rf"on {month} (\d{{1,2}})", description, re.IGNORECASE)
         if match:
             day = match.group(1).zfill(2)
-            year = datetime.now().year # Assumption
+            today = datetime.now().date()
+            year = today.year
+            try:
+                candidate = datetime(year, int(num), int(day)).date()
+                # If candidate is in the future, assume previous year
+                if candidate > today:
+                    candidate = datetime(year - 1, int(num), int(day)).date()
+                return candidate.strftime("%Y-%m-%d")
+            except Exception:
+                return f"{year}-{num}-{day}"
+
+        # Pattern: Month DD, YYYY or Month DD YYYY
+        match_mdy = re.search(rf"{month}\s+(\d{{1,2}}),?\s+(\d{{4}})", description, re.IGNORECASE)
+        if match_mdy:
+            day = match_mdy.group(1).zfill(2)
+            year = match_mdy.group(2)
             return f"{year}-{num}-{day}"
 
         # NEW Pattern: DD Month YYYY (e.g. 24 September 2025)
@@ -181,38 +196,66 @@ async def extract_victim_from_tx_hash(
 
     try:
         # Use token-transfers tool
-        result = await client.token_transfers(tx_hash, blockchain_name)
+        tool_input = json.dumps({"tx_hash": tx_hash, "blockchain_name": blockchain_name})
+        with function_span("token_transfers", input=tool_input) as tool_span:
+            try:
+                result = await client.token_transfers(tx_hash, blockchain_name)
+                try:
+                    if hasattr(tool_span, "span_data"):
+                        tool_span.span_data.output = {"status": "ok"}
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    tool_span.set_error({"message": str(e), "data": {"tool": "token_transfers"}})
+                except Exception:
+                    pass
+                raise
 
         # Handle text-wrapped JSON response
         if isinstance(result, dict) and "text" in result:
-             try:
-                import json
+            try:
                 result = json.loads(result["text"])
-             except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError):
                 pass
 
         data = result.get("data", [])
         if not data:
             raise ValueError(f"No transfer data found for transaction {tx_hash}")
 
-        # Use the first transfer
-        transfer = data[0]
+        # Choose the transfer with the largest amount (more reliable than first)
+        def _amount(tr):
+            amt = tr.get("amount") or tr.get("amount_coerced") or tr.get("value")
+            try:
+                return float(amt)
+            except Exception:
+                return 0.0
+
+        transfer = max(data, key=_amount)
 
         # Extract details
         # The input address is the sender, which is typically the victim in a theft context
         input_data = transfer.get("input", {})
         victim_address = input_data.get("address") if isinstance(input_data, dict) else None
+        if not victim_address:
+            victim_address = transfer.get("from")
 
         if not victim_address:
              raise ValueError(f"Could not find input address in transfer data for {tx_hash}")
 
-        token_id = transfer.get("token_id", 0)
+        token_id = transfer.get("token_id", 0) or transfer.get("tokenId", 0)
         block_time = transfer.get("block_time")
 
         # Infer asset symbol
         asset_symbol = None
-        if token_id == 0:
-             asset_symbol = "ETH" if blockchain_name == "eth" else blockchain_name.upper()
+        if transfer.get("asset"):
+            asset_symbol = transfer.get("asset")
+        elif transfer.get("symbol"):
+            asset_symbol = transfer.get("symbol")
+        elif isinstance(transfer.get("token"), dict):
+            asset_symbol = transfer["token"].get("symbol") or transfer["token"].get("name")
+        if token_id == 0 and not asset_symbol:
+            asset_symbol = "ETH" if blockchain_name == "eth" else blockchain_name.upper()
 
         logger.debug(f"Found victim address: {victim_address}, token_id: {token_id}")
         return victim_address, token_id, asset_symbol, block_time

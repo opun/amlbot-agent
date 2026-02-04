@@ -224,16 +224,21 @@ export function Chat() {
 
         let statusMessages: string[] = [];
 
+        let buffer = "";
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n").filter((line) => line.trim());
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          const parts = buffer.split("\n");
+          buffer = parts.pop() || "";
+          const lines = parts.filter((line) => line.trim());
 
           for (const line of lines) {
             try {
               const data = JSON.parse(line);
+              console.debug("[trace] event", data);
 
               if (data.type === "status") {
                 statusMessages.push(data.message);
@@ -258,6 +263,7 @@ export function Chat() {
                 );
               } else if (data.type === "result") {
                 const hasOptions = data.continuation_options && data.continuation_options.length > 0;
+                const traceUrl = data.trace_url || (data.trace_id ? `https://platform.openai.com/traces/trace?trace_id=${data.trace_id}` : undefined);
 
                 // Prepare combined reports for formatting
                 // We need to include the current report + any previous ones
@@ -279,6 +285,7 @@ export function Chat() {
                           responseType: hasOptions ? "continuation" : "result",
                           continuationOptions: hasOptions ? data.continuation_options : undefined,
                           canContinue: data.can_continue,
+                          traceUrl: traceUrl || m.traceUrl,
                         }
                       : m
                   )
@@ -304,7 +311,31 @@ export function Chat() {
               }
             } catch {
               // Skip non-JSON lines
+              console.debug("[trace] non-json line", line);
             }
+          }
+        }
+        // Try to parse any remaining buffered data
+        if (buffer.trim()) {
+          try {
+            const data = JSON.parse(buffer);
+            console.debug("[trace] event (buffer)", data);
+            if (data.type === "status") {
+              statusMessages.push(data.message);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMessageId
+                    ? {
+                        ...m,
+                        content: statusMessages.map((s) => `⏳ ${s}`).join("\n"),
+                        status: "streaming",
+                      }
+                    : m
+                )
+              );
+            }
+          } catch {
+            // ignore leftover partial JSON
           }
         }
       } else {

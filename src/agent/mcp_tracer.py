@@ -1,20 +1,20 @@
 """
-HTTP Tracer - extends BaseTracer with HTTP-based tool execution.
-Uses MCPHTTPClient to call remote MCP server via HTTP API.
+MCP Tracer - extends BaseTracer with local MCP stdio-based tool execution.
+Uses MCPClient to call tools via local MCP server process.
 """
 import logging
 from typing import Any, Dict
 
 from .base_tracer import BaseTracer
-from .mcp_http_client import MCPHTTPClient
+from .mcp_client import MCPClient
 
 logger = logging.getLogger("tracer")
 
 
-class HTTPTracer(BaseTracer):
-    """Tracer that uses HTTP client to call MCP tools remotely."""
+class MCPTracer(BaseTracer):
+    """Tracer that uses local MCP client via stdio."""
 
-    def __init__(self, client: MCPHTTPClient):
+    def __init__(self, client: MCPClient):
         super().__init__()
         self.client = client
 
@@ -22,8 +22,11 @@ class HTTPTracer(BaseTracer):
         return self.client
 
     async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        """Execute a tool via HTTP API."""
-        logger.info(f"🔧 Executing {tool_name} via HTTP")
+        """Execute a tool via MCP stdio client."""
+        logger.info(f"🔧 Executing {tool_name} via MCP")
+
+        # MCP tool names use hyphens, convert from underscores
+        mcp_tool_name = tool_name.replace("_", "-")
 
         if tool_name == "expert_search":
             return await self.client.expert_search(
@@ -32,8 +35,8 @@ class HTTPTracer(BaseTracer):
             )
         elif tool_name == "get_address":
             return await self.client.get_address(
-                arguments["blockchain_name"],
-                arguments["address"]
+                arguments["address"],
+                arguments["blockchain_name"]
             )
         elif tool_name == "token_stats":
             return await self.client.token_stats(

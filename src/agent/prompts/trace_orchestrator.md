@@ -1,15 +1,19 @@
 # Blockchain Tracing Agent Instructions
 
 ## Task
-Trace funds from a theft incident using AML MCP tools. Follow the rules below to make intelligent tracing decisions. Use tools proactively and reason about which paths are most suspicious rather than following every possible branch.
+Trace funds from a theft incident using AML MCP tools. The goal is to identify the **most promising transaction paths** (highest likelihood of theft flow) rather than exhaustively following every branch. Use tools proactively and prioritize high-signal paths.
 
 ## User Inputs
 - Victim Address: {victim_address} (extracted from tx_hash if provided)
 - Transaction Hash: {tx_hash} (optional)
 - Blockchain: {blockchain_name}
-- Asset: {asset_symbol} (auto-detected if not provided)
+- Asset (stolen asset symbol): {asset_symbol} (auto-detected if not provided)
 - Approximate Date: {approx_date} (optional, inferred from tx if tx_hash provided)
 - Description: {description}
+
+**IMPORTANT VARIABLE USAGE**
+- `asset_symbol` is the stolen asset symbol (e.g., USDT) and must be passed to `get-extra-address-info`.
+- `blockchain_name` is the chain identifier (e.g., trx, eth) and must be passed to chain-specific tools.
 
 ## Available MCP Tools
 
@@ -246,6 +250,14 @@ Result: selected_txs = [AAA, BBB]
 WRONG: selecting [CCC] because 484,300 is closest to 503,300 - never select by amount similarity!
 
 **Step 3: Branch selection and DEPTH-FIRST tracing (CRITICAL)**
+To avoid getting stuck or exploring too many low-signal branches:
+- Rank candidate transactions by **promising score**:
+  1. Amount (larger is better)
+  2. Time proximity to incoming tx (closer is better)
+  3. Risk signals or service detection on recipient
+- Follow only the top **1–3** branches per hop.
+  - Prefer **top 1** if one clearly dominates in amount or service signal.
+  - Max 3 to keep the trace focused and fast.
 When you have multiple selected transactions, you MUST create **SEPARATE PATH OBJECTS** in your JSON output.
 
 **CRITICAL RULE: A "Path" in the JSON output must be a single LINEAR chain (A→B→C).**
@@ -430,6 +442,17 @@ JSON Schema for reference:
 
 ### 9) CRITICAL: Output Format Requirements
 **YOUR FINAL RESPONSE MUST BE VALID JSON ONLY.**
+
+### 10) Efficiency & Anti-Stuck Rules
+- Limit `all-txs` calls to `limit=20` unless explicitly required.
+- If a tool output is very large, summarize and proceed (do not request large batches repeatedly).
+- If you cannot make progress after 3 tool calls on the same hop, stop that path with a clear stop_reason and move on.
+
+### 11) Selector Results (IMPORTANT)
+If you receive a message like:
+`SELECTOR_RESULT: {{"selected_hashes": ["..."], "reasoning": "..."}}`
+then ONLY call `token-transfers` for the hashes listed in `selected_hashes`.
+Do NOT request token-transfers for any other hashes.
 - Do NOT include any markdown formatting
 - Do NOT wrap the JSON in code fences
 - Do NOT provide explanations before or after the JSON

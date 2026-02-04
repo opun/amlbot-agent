@@ -465,6 +465,13 @@ async def _run_trace_http(
                 "trace_id": trace_id,
                 "trace_url": trace_url,
             }
+            if result.visualization_url:
+                response_data["visualization_url"] = result.visualization_url
+            # Attach raw arrays for visualization pipeline (txs + txList)
+            if hasattr(tracer, "last_txs"):
+                response_data["txs_array"] = tracer.last_txs
+            if hasattr(tracer, "last_tx_list"):
+                response_data["txlist_array"] = tracer.last_tx_list
             logger.info("Trace result ready: report_keys=%s", list(report.keys()) if isinstance(report, dict) else "non-dict")
 
             if continuation_options:
@@ -578,6 +585,13 @@ async def _run_trace_stdio(
                     "trace_id": trace_id,
                     "trace_url": trace_url,
                 }
+                if result.visualization_url:
+                    response_data["visualization_url"] = result.visualization_url
+                # Attach raw arrays for visualization pipeline (txs + txList)
+                if hasattr(tracer, "last_txs"):
+                    response_data["txs_array"] = tracer.last_txs
+                if hasattr(tracer, "last_tx_list"):
+                    response_data["txlist_array"] = tracer.last_tx_list
                 logger.info("Trace result ready: report_keys=%s", list(report.keys()) if isinstance(report, dict) else "non-dict")
 
                 if continuation_options:

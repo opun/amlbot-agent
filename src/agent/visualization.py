@@ -7,6 +7,28 @@ from agent.models import TraceResult, Entity, Step, TraceStats
 
 logger = logging.getLogger(__name__)
 
+def _normalize_chain(chain: str) -> str:
+    c = (chain or "").lower()
+    if c in {"tron", "trc", "trc20", "trx"}:
+        return "trx"
+    if c in {"ethereum", "eth"}:
+        return "eth"
+    if c in {"binance", "bsc", "bnb", "bep20"}:
+        return "bnb"
+    return c
+
+def _normalize_tx_descriptor(desc: str, chain: str, token_id: Optional[int]) -> str:
+    if not desc:
+        return desc
+    parts = desc.split("-")
+    if len(parts) < 4:
+        return desc
+    suffix = parts[-1]
+    token_part = parts[-2]
+    hash_part = "-".join(parts[:-3])
+    token_val = str(token_id) if token_id is not None else token_part
+    return f"{hash_part}-{chain}-{token_val}-{suffix}"
+
 def _get_descriptor(address: str, chain: str, token_id: int = 0) -> str:
     """Generate a descriptor string for nodes/edges."""
     # Standard address descriptor
@@ -137,7 +159,12 @@ def _get_token_id(asset: str, chain: str) -> int:
          
     return abs(hash(f"{chain}:{asset}")) % 1000 + 1
 
-def generate_visualization_payload(trace_result: TraceResult, title: Optional[str] = None) -> Dict[str, Any]:
+def generate_visualization_payload(
+    trace_result: TraceResult,
+    title: Optional[str] = None,
+    tx_list: Optional[List[Dict[str, Any]]] = None,
+    txs: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """
     Generate visualization payload from TraceResult.
     Format matches the expected structure (corrected.json).
@@ -150,31 +177,58 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     # 1. Prepare data structures
     items = []
     connects = []
-    txs = []
+    txs_output = []
     comments = []
     currency_info = {}
-    tx_list_inputs = [] # Use separate list for helpers.txList
+    tx_list_inputs = []
+    if tx_list:
+        for tx in tx_list:
+            norm = dict(tx)
+            norm_chain = _normalize_chain(norm.get("currency"))
+            norm["currency"] = norm_chain
+            if "tokenId" in norm and norm["tokenId"] is not None:
+                try:
+                    norm["tokenId"] = int(norm["tokenId"])
+                except Exception:
+                    pass
+            if "token_id" in norm and norm["token_id"] is not None:
+                try:
+                    norm["token_id"] = int(norm["token_id"])
+                except Exception:
+                    pass
+            tx_list_inputs.append(norm)
+    use_provided_tx_list = bool(tx_list_inputs)
     
     address_to_entity = {e.address: e for e in trace_result.entities}
     
-    service_address_map = {} 
+    service_comment_map = {}
     ren_counter = 0
     for entity in trace_result.entities:
-        if _is_service(entity):
-            service_address_map[entity.address] = f"«ren»{ren_counter}"
+        if entity.role in {"victim", "perpetrator", "bridge_service", "cex_deposit", "otc_service", "unidentified_service"}:
+            service_comment_map[entity.address] = f"«ren»{ren_counter}"
             ren_counter += 1
 
     # --- Pass 1: Build Graph Topology & Weights ---
     node_descriptors = set()
-    service_descriptors = set(service_address_map.values())
+    service_descriptors = set(service_comment_map.values())
     edges = []
     
     token_id_map = {} # (chain, asset) -> int
+    if tx_list_inputs:
+        try:
+            asset_hint = (trace_result.case_meta.asset_symbol or "").upper()
+        except Exception:
+            asset_hint = ""
+        for tx in tx_list_inputs:
+            chain = _normalize_chain(tx.get("currency"))
+            token_id = tx.get("tokenId")
+            if token_id is None:
+                token_id = tx.get("token_id")
+            if chain and token_id is not None and asset_hint:
+                token_id_map[(chain, asset_hint)] = int(token_id)
     node_weights = defaultdict(float) # descriptor -> total volume
     
     def get_node_descriptor(address: str, chain: str, token_id: int) -> str:
-        if address in service_address_map:
-            return service_address_map[address]
         return _get_descriptor(address, chain, token_id)
 
     # We need to collect all steps to build graph
@@ -182,15 +236,44 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     for path in trace_result.paths:
         all_steps.extend(path.steps)
 
+    tx_desc_by_hash = {}
+    if txs:
+        normalized_txs = []
+        for tx in txs:
+            norm = dict(tx)
+            chain = _normalize_chain(norm.get("currency"))
+            norm["currency"] = chain
+            token_id = norm.get("token_id")
+            if token_id is None:
+                token_id = norm.get("tokenId")
+            if token_id is not None:
+                try:
+                    token_id = int(token_id)
+                except Exception:
+                    pass
+                norm["token_id"] = token_id
+            desc = norm.get("descriptor")
+            if desc:
+                norm["descriptor"] = _normalize_tx_descriptor(desc, chain, token_id)
+            normalized_txs.append(norm)
+            tx_hash = norm.get("hash")
+            tx_desc = norm.get("descriptor")
+            if tx_hash and tx_desc:
+                tx_desc_by_hash[tx_hash] = tx_desc
+        txs = normalized_txs
+    tx_desc_seen = set(tx_desc_by_hash.values())
+
     for step in all_steps:
-        key = (step.chain, step.asset)
+        chain = _normalize_chain(step.chain)
+        asset = (step.asset or "").upper()
+        key = (chain, asset)
         if key not in token_id_map:
-            token_id_map[key] = _get_token_id(step.asset, step.chain)
+            token_id_map[key] = _get_token_id(asset, chain)
         
         token_id = token_id_map[key]
         
-        src = get_node_descriptor(step.from_address, step.chain, token_id)
-        dst = get_node_descriptor(step.to_address, step.chain, token_id)
+        src = get_node_descriptor(step.from_address, chain, token_id)
+        dst = get_node_descriptor(step.to_address, chain, token_id)
         
         node_descriptors.add(src)
         node_descriptors.add(dst)
@@ -223,54 +306,32 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
         pos = positions.get(descriptor, {"x": 0, "y": 0})
         entity = address_to_entity.get(address)
         
-        if descriptor in service_descriptors:
-            label = "Unknown Service"
-            if entity and entity.labels:
-                label = entity.labels[0]
-            elif entity and entity.role:
-                label = entity.role.replace("_", " ").title()
-            
-            comments.append({
-                "author": "User", 
-                "date": time.time(),
-                "descriptor": descriptor,
-                "text": label,
-                "type": "comment",
-                "width": 126,
-                "height": 50, 
-                "isManuallyMoved": True,
-                "typeOfComment": "comment",
-                "color": "#77869E",
-                "x": pos["x"],
-                "y": pos["y"]
-            })
-        else:
-            risk_score = entity.risk_score if entity else 0.0
-            owner = None
-            if entity and entity.labels:
-                 owner = {
-                     "id": 0,
-                     "name": entity.labels[0],
-                     "slug": entity.labels[0], 
-                     "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
-                     "subtype": None
-                 }
-                 
-            items.append({
-                "address": address,
-                "descriptor": descriptor,
-                "x": pos["x"],
-                "y": pos["y"],
-                "extend": {
-                    "currency": chain,
-                    "token_id": token_id,
-                    "owner": owner,
-                    "riskScore": risk_score,
-                    "type": "address"
-                },
-                "type": "address",
-                "isManuallyMoved": True
-            })
+        risk_score = entity.risk_score if entity else 0.0
+        owner = None
+        if entity and entity.labels:
+             owner = {
+                 "id": 0,
+                 "name": entity.labels[0],
+                 "slug": entity.labels[0], 
+                 "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
+                 "subtype": None
+             }
+             
+        items.append({
+            "address": address,
+            "descriptor": descriptor,
+            "x": pos["x"],
+            "y": pos["y"],
+            "extend": {
+                "currency": chain,
+                "token_id": token_id,
+                "owner": owner,
+                "riskScore": risk_score,
+                "type": "address"
+            },
+            "type": "address",
+            "isManuallyMoved": True
+        })
         added_descriptors.add(descriptor)
 
     # --- Pre-fill Currency Info with Native ---
@@ -290,9 +351,13 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     # Prepare for autoTxs: map address -> list of (step_index, type, hash, path)
     address_activity = defaultdict(list)
 
+    if txs:
+        txs_output = list(txs)
+
     for i_step, step in enumerate(all_steps):
-        chain = step.chain
-        token_id = token_id_map.get((chain, step.asset), 0)
+        chain = _normalize_chain(step.chain)
+        asset = (step.asset or "").upper()
+        token_id = token_id_map.get((chain, asset), 0)
         
         src_desc = get_node_descriptor(step.from_address, chain, token_id)
         tgt_desc = get_node_descriptor(step.to_address, chain, token_id)
@@ -300,49 +365,23 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
         add_node_or_comment(step.from_address, chain, token_id)
         add_node_or_comment(step.to_address, chain, token_id)
         
-        is_service_connection = (src_desc in service_descriptors) or (tgt_desc in service_descriptors)
-        
         src_pos = positions.get(src_desc, {"x": 0, "y": 0})
         tgt_pos = positions.get(tgt_desc, {"x": 0, "y": 0})
         
         # Basic edge color
         edge_color = "#EC292C" 
         
-        if is_service_connection:
-            connects.append({
-                "source": src_desc,
-                "target": tgt_desc,
-                "data": {
-                    "color": "#C2C6CE", 
-                    "type": "smoothstep",
-                    "hovered": False
-                }
-            })
-        else:
-            connects.append({
-                "source": src_desc,
-                "target": tgt_desc,
-                "data": {
-                    "currency": chain,
-                    "amount": step.amount_estimate,
-                    "fiatRate": 1.0, 
-                    "token_id": token_id,
-                    "color": edge_color,
-                    "isNew": True,
-                    "isNeedReverse": False,
-                    "hovered": False
-                }
-            })
-            
-            tx_hash = step.tx_hash or f"tx-{uuid.uuid4().hex}"
-            tx_desc = f"{tx_hash}-{chain}-{token_id}-{i_step}"
-            
-            mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
-            mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
-            y_offset = -40 if i_step % 2 == 0 else 40
-            if src_desc == tgt_desc: y_offset = 0
-            
-            txs.append({
+        tx_hash = step.tx_hash or f"tx-{uuid.uuid4().hex}"
+        tx_desc = tx_desc_by_hash.get(step.tx_hash) or f"{tx_hash}-{chain}-{token_id}-{i_step}"
+
+        mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
+        mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
+        y_offset = -40 if i_step % 2 == 0 else 40
+        if src_desc == tgt_desc:
+            y_offset = 0
+
+        if tx_desc not in tx_desc_seen:
+            txs_output.append({
                 "currency": chain,
                 "descriptor": tx_desc,
                 "hash": step.tx_hash,
@@ -353,24 +392,55 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
                 "path": "0", 
                 "type": "txEth"
             })
-            
-            # Record activity for autoTxs
-            # For Sender (OUT)
-            address_activity[(step.from_address, chain, token_id)].append({
-                "type": "out", 
-                "hash": step.tx_hash, 
-                "index": i_step,
-                "path": "0" 
-            })
-            # For Receiver (IN)
-            address_activity[(step.to_address, chain, token_id)].append({
-                 "type": "in",
-                 "hash": step.tx_hash,
-                 "index": i_step,
-                 "path": "0"
-            })
+            tx_desc_seen.add(tx_desc)
 
-            # Populate helper txList
+        connects.append({
+            "source": src_desc,
+            "target": tx_desc,
+            "data": {
+                "currency": chain,
+                "amount": None,
+                "fiatRate": 1.0, 
+                "token_id": token_id,
+                "color": edge_color,
+                "isNew": True,
+                "isNeedReverse": False,
+                "hovered": False
+            }
+        })
+        connects.append({
+            "source": tx_desc,
+            "target": tgt_desc,
+            "data": {
+                "currency": chain,
+                "amount": None,
+                "fiatRate": 1.0, 
+                "token_id": token_id,
+                "color": edge_color,
+                "isNew": True,
+                "isNeedReverse": False,
+                "hovered": False
+            }
+        })
+        
+        # Record activity for autoTxs
+        # For Sender (OUT)
+        address_activity[(step.from_address, chain, token_id)].append({
+            "type": "out", 
+            "hash": step.tx_hash, 
+            "index": i_step,
+            "path": "0" 
+        })
+        # For Receiver (IN)
+        address_activity[(step.to_address, chain, token_id)].append({
+             "type": "in",
+             "hash": step.tx_hash,
+             "index": i_step,
+             "path": "0"
+        })
+
+        # Populate helper txList if not provided
+        if not use_provided_tx_list:
             tx_list_inputs.append({
                 "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}], 
                 "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
@@ -392,11 +462,12 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
             })
         
         if token_id not in currency_info:
+            asset_upper = (step.asset or "").upper()
             currency_info[token_id] = {
                 "currency": chain,
                 "issuer": None, 
-                "name": "Tether USD" if token_id == 9 else step.asset,
-                "symbol": "USDT" if token_id == 9 else step.asset,
+                "name": "Tether USD" if asset_upper == "USDT" else step.asset,
+                "symbol": asset_upper if asset_upper else step.asset,
                 "token_id": token_id,
                 "unit": 6 
             }
@@ -405,7 +476,7 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     auto_txs = []
     
     for (address, chain, token_id), activities in address_activity.items():
-        if address in service_address_map: continue # Skip service nodes for autoTxs?
+        if address in service_comment_map: continue # Skip service nodes for autoTxs?
         
         # Sort by step index
         activities.sort(key=lambda x: x["index"])
@@ -444,8 +515,49 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
         "connects": connects,
         "items": items,
         "transform": {"k": 1, "x": 0, "y": 0},
-        "txs": txs
+        "txs": txs_output
     }
+
+    # --- Add role labels as comments (victim/perp/service) ---
+    role_labels = {
+        "victim": "Victim's address",
+        "perpetrator": "Perpetrator's address",
+        "bridge_service": "Bridge service",
+        "cex_deposit": "Exchange deposit address",
+        "otc_service": "OTC service",
+        "unidentified_service": "Suspected unidentified service"
+    }
+    for entity in trace_result.entities:
+        if entity.address not in service_comment_map:
+            continue
+        comment_desc = service_comment_map[entity.address]
+        token_id = token_id_map.get((_normalize_chain(entity.chain), (trace_result.case_meta.asset_symbol or "").upper()), 0)
+        address_desc = _get_descriptor(entity.address, _normalize_chain(entity.chain), token_id)
+        pos = positions.get(address_desc, {"x": 0, "y": 0})
+        label = role_labels.get(entity.role) or (entity.labels[0] if entity.labels else entity.role.replace("_", " ").title())
+        comments.append({
+            "author": "User",
+            "date": time.time(),
+            "descriptor": comment_desc,
+            "text": label,
+            "type": "comment",
+            "width": 126,
+            "height": 50 if entity.role in {"bridge_service", "cex_deposit", "otc_service", "unidentified_service"} else 35,
+            "isManuallyMoved": True,
+            "typeOfComment": "comment",
+            "color": "#77869E",
+            "x": pos["x"] + 90,
+            "y": pos["y"] - 80
+        })
+        connects.append({
+            "source": comment_desc,
+            "target": address_desc,
+            "data": {
+                "color": "#C2C6CE",
+                "type": "smoothstep",
+                "hovered": False
+            }
+        })
     
     # Hardcoded helpers from example
     helpers = {
@@ -473,7 +585,7 @@ def generate_visualization_payload(trace_result: TraceResult, title: Optional[st
     default_title = f"Trace: {trace_result.case_meta.description[:30]}..." if trace_result.case_meta.description else f"Trace {trace_result.case_meta.case_id}"
     
     # Final summary logging
-    logger.info(f"✅ Visualization built: {len(items)} items, {len(connects)} connections, {len(txs)} transactions")
+    logger.info(f"✅ Visualization built: {len(items)} items, {len(connects)} connections, {len(txs_output)} transactions")
     logger.info(f"📦 Currencies: {[c['symbol'] for c in currency_info.values()]}")
     logger.debug(f"Currency Info: {list(currency_info.values())}")
     logger.debug(f"AutoTxs count: {len(auto_txs)}")

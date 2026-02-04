@@ -28,6 +28,7 @@ from .theft_detection import (
     extract_victim_from_tx_hash,
 )
 from .trace_postprocess import postprocess_trace_result
+from .visualization import generate_visualization_payload
 from .config import ModelConfig
 
 logger = logging.getLogger("tracer")
@@ -2119,10 +2120,56 @@ class BaseTracer(ABC):
             trace_result.case_meta.trace_id = trace_id
 
         trace_result = postprocess_trace_result(trace_result)
-
-        logger.info("🛑 Visualization generation disabled. Skipping save/share.")
+        await self._maybe_save_visualization(trace_result)
 
         return trace_result
+
+    async def _maybe_save_visualization(self, trace_result: TraceResult) -> None:
+        """Generate and save/share visualization, if possible."""
+        try:
+            tx_list = getattr(self, "last_tx_list", None)
+            txs = getattr(self, "last_txs", None)
+            viz_payload = generate_visualization_payload(trace_result, tx_list=tx_list, txs=txs)
+        except Exception as exc:
+            logger.warning(f"⚠️ Visualization payload generation failed: {exc}")
+            return
+
+        client = self._get_client()
+        save_fn = getattr(client, "save_and_share_visualization", None)
+        if not callable(save_fn):
+            logger.warning("⚠️ Visualization save/share not supported by client.")
+            return
+
+        try:
+            save_input = {
+                "title": viz_payload.get("title"),
+                "type": viz_payload.get("type", "address"),
+                "payload": viz_payload.get("payload", {}),
+                "helpers": viz_payload.get("helpers", {}),
+                "extras": viz_payload.get("extras", {}),
+            }
+            result = await asyncio.wait_for(save_fn(save_input), timeout=30.0)
+        except Exception as exc:
+            logger.warning(f"⚠️ Visualization save/share failed: {exc}")
+            return
+
+        share_url = None
+        if isinstance(result, dict):
+            share_url = (
+                result.get("share_url") or
+                result.get("url") or
+                result.get("data", {}).get("url") or
+                result.get("data", {}).get("share_url")
+            )
+            share_obj = result.get("share_result") if isinstance(result.get("share_result"), dict) else {}
+            if not share_url and share_obj:
+                share_url = share_obj.get("url") or share_obj.get("share_url")
+
+        if share_url:
+            trace_result.visualization_url = share_url
+            logger.info(f"✅ Visualization saved/shared: {share_url}")
+        else:
+            logger.info("✅ Visualization saved/shared (no URL returned).")
 
     @abstractmethod
     def _get_client(self):

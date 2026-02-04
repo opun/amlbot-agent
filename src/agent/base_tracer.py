@@ -4,11 +4,13 @@ Interface implementations: MCPTracer (local stdio), HTTPTracer (remote HTTP).
 """
 import json
 import uuid
+import os
 import logging
 import asyncio
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from functools import lru_cache
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable, Awaitable
@@ -1120,7 +1122,7 @@ class BaseTracer(ABC):
         """Agentic split prompts: selector + hop classifier, tool execution in code."""
         case_meta = payload.get("case_meta", {})
         inputs = payload.get("inputs", {})
-        chain = (inputs.get("blockchain_name") or case_meta.get("blockchain_name") or "eth").lower()
+        chain = self._normalize_chain(inputs.get("blockchain_name") or case_meta.get("blockchain_name") or "eth")
         asset = (inputs.get("asset_symbol") or case_meta.get("asset_symbol") or "").upper()
         tx_hash = inputs.get("tx_hash")
         victim_address = inputs.get("victim_address")
@@ -1145,6 +1147,12 @@ class BaseTracer(ABC):
         txs_seen: set = set()
 
         async def _call_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
+            if "blockchain_name" in arguments:
+                arguments["blockchain_name"] = self._normalize_chain(arguments.get("blockchain_name"))
+            if "chain" in arguments:
+                arguments["chain"] = self._normalize_chain(arguments.get("chain"))
+            if "asset" in arguments:
+                arguments["asset"] = self._normalize_chain(arguments.get("asset"))
             tool_input = json.dumps(arguments, ensure_ascii=False)
             tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
             with function_span(tool_name, input=tool_input) as tool_span:
@@ -1690,7 +1698,7 @@ class BaseTracer(ABC):
                         labels.append("Bridge")
                     _ensure_entity(job.current_address, role, risk_score, labels=labels, notes=notes)
 
-                    dst_chain_norm = str(dst_chain).lower()
+                    dst_chain_norm = self._normalize_chain(dst_chain)
                     bridge_amount = self._normalize_amount(
                         amount_out if amount_out is not None else (job.incoming_amount or 0.0),
                         dst_chain_norm,
@@ -2140,38 +2148,163 @@ class BaseTracer(ABC):
             logger.warning("⚠️ Visualization save/share not supported by client.")
             return
 
+        save_input = {
+            "title": viz_payload.get("title"),
+            "type": viz_payload.get("type", "address"),
+            "payload": viz_payload.get("payload", {}),
+            "helpers": viz_payload.get("helpers", {}),
+            "extras": viz_payload.get("extras", {}),
+        }
         try:
-            save_input = {
-                "title": viz_payload.get("title"),
-                "type": viz_payload.get("type", "address"),
-                "payload": viz_payload.get("payload", {}),
-                "helpers": viz_payload.get("helpers", {}),
-                "extras": viz_payload.get("extras", {}),
-            }
-            result = await asyncio.wait_for(save_fn(save_input), timeout=30.0)
+            span_input = json.dumps({
+                "title": save_input.get("title"),
+                "type": save_input.get("type"),
+                "has_payload": bool(save_input.get("payload")),
+            }, ensure_ascii=False)
+            span_input = span_input[:2000] if len(span_input) > 2000 else span_input
+            with function_span("save_visualization", input=span_input) as tool_span:
+                try:
+                    result = await asyncio.wait_for(save_fn(save_input), timeout=30.0)
+                    try:
+                        if hasattr(tool_span, "span_data"):
+                            tool_span.span_data.output = self._compact_tool_result("save-visualization", result)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    try:
+                        tool_span.set_error({"message": str(exc), "data": {"tool": "save_visualization"}})
+                        if hasattr(tool_span, "span_data"):
+                            tool_span.span_data.output = {"error": str(exc)}
+                    except Exception:
+                        pass
+                    raise
         except Exception as exc:
             logger.warning(f"⚠️ Visualization save/share failed: {exc}")
             return
 
+        def _deep_find(obj: Any, keys: set) -> Optional[str]:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in keys and isinstance(v, str) and v:
+                        return v
+                    found = _deep_find(v, keys)
+                    if found:
+                        return found
+            elif isinstance(obj, list):
+                for item in obj:
+                    found = _deep_find(item, keys)
+                    if found:
+                        return found
+            return None
+
         share_url = None
+        hash_value = None
         if isinstance(result, dict):
             share_url = (
                 result.get("share_url") or
-                result.get("url") or
-                result.get("data", {}).get("url") or
-                result.get("data", {}).get("share_url")
+                result.get("shareUrl") or
+                result.get("shareURL")
             )
-            share_obj = result.get("share_result") if isinstance(result.get("share_result"), dict) else {}
-            if not share_url and share_obj:
-                share_url = share_obj.get("url") or share_obj.get("share_url")
+            if not share_url:
+                share_obj = result.get("share_result") if isinstance(result.get("share_result"), dict) else {}
+                share_url = share_obj.get("share_url") or share_obj.get("shareUrl") or share_obj.get("url")
+            if not share_url:
+                share_url = _deep_find(result, {"share_url", "shareUrl", "shareURL", "share_link", "shareLink"})
+            if not share_url:
+                candidate = _deep_find(result, {"url"})
+                if candidate and "/api/" not in candidate:
+                    share_url = candidate
+
+            if not hash_value:
+                hash_value = (
+                    result.get("hash") or
+                    result.get("data", {}).get("hash") or
+                    result.get("data", {}).get("payload", {}).get("hash")
+                )
+            if not hash_value:
+                hash_value = _deep_find(result, {"hash"})
+
+        if not share_url and hash_value:
+            base_url = (
+                os.getenv("VISUALIZATION_BASE_URL") or
+                os.getenv("NEXT_PUBLIC_WEB_URL") or
+                os.getenv("NEXT_PUBLIC_APP_URL") or
+                os.getenv("NEXT_PUBLIC_API_URL") or
+                ""
+            ).rstrip("/")
+            template = os.getenv("VISUALIZATION_URL_TEMPLATE", "")
+            if template:
+                try:
+                    share_url = template.format(base=base_url, hash=hash_value)
+                except Exception:
+                    pass
+            if not share_url:
+                if base_url:
+                    share_url = f"{base_url}/visualization/{hash_value}"
+                else:
+                    share_url = f"/visualization/{hash_value}"
 
         if share_url:
             trace_result.visualization_url = share_url
             logger.info(f"✅ Visualization saved/shared: {share_url}")
         else:
-            logger.info("✅ Visualization saved/shared (no URL returned).")
+            preview = ""
+            try:
+                preview = json.dumps(result, ensure_ascii=False)[:800]
+            except Exception:
+                preview = str(result)[:800]
+            logger.info(f"✅ Visualization saved/shared (no URL returned). result_preview={preview}")
 
     @abstractmethod
     def _get_client(self):
         """Return the underlying client for theft_detection helpers."""
         pass
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _chain_alias_map() -> Dict[str, str]:
+        path = Path(__file__).resolve().parents[1] / "currencies.json"
+        mapping: Dict[str, str] = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = []
+        for item in data if isinstance(data, list) else []:
+            if item.get("token_id") != 0:
+                continue
+            if item.get("issuer") is not None:
+                continue
+            currency = item.get("currency")
+            if not currency:
+                continue
+            currency = str(currency).lower()
+            mapping[currency] = currency
+            symbol = item.get("symbol")
+            if symbol:
+                mapping[str(symbol).lower()] = currency
+            name = item.get("name")
+            if name:
+                mapping[str(name).lower()] = currency
+        return mapping
+
+    @staticmethod
+    def _normalize_chain(chain: Optional[str]) -> str:
+        c = (chain or "").strip().lower()
+        if not c:
+            return c
+        manual = {
+            "tron": "trx",
+            "trc": "trx",
+            "trc20": "trx",
+            "trx": "trx",
+            "ethereum": "eth",
+            "eth": "eth",
+            "binance": "bnb",
+            "bsc": "bnb",
+            "bnb": "bnb",
+            "bep20": "bnb",
+        }
+        if c in manual:
+            return manual[c]
+        alias_map = BaseTracer._chain_alias_map()
+        return alias_map.get(c, c)

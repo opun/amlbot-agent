@@ -58,6 +58,8 @@ def build_summary_text(trace_result: TraceResult) -> str:
 
     summary += f"\nTrace Stats:\n- Explored Paths: {stats.explored_paths}\n"
     summary += f"- Initial Amount: {stats.initial_amount_estimate}\n"
+    if trace_result.visualization_url:
+        summary += f"- Visualization: {trace_result.visualization_url}\n"
 
     if not trace_result.paths:
         summary += "\nNo paths found. No outgoing theft transaction identified."

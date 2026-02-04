@@ -27,6 +27,7 @@ interface Message {
   status?: "pending" | "streaming" | "complete" | "error";
   report?: TraceReport | null;
   traceUrl?: string;
+  visualizationUrl?: string;
   collectedInfo?: Record<string, any>;
   responseType?: string;
   continuationOptions?: ContinuationOption[];
@@ -264,6 +265,7 @@ export function Chat() {
               } else if (data.type === "result") {
                 const hasOptions = data.continuation_options && data.continuation_options.length > 0;
                 const traceUrl = data.trace_url || (data.trace_id ? `https://platform.openai.com/traces/trace?trace_id=${data.trace_id}` : undefined);
+                const visualizationUrl = data.visualization_url;
 
                 // Prepare combined reports for formatting
                 // We need to include the current report + any previous ones
@@ -286,6 +288,7 @@ export function Chat() {
                           continuationOptions: hasOptions ? data.continuation_options : undefined,
                           canContinue: data.can_continue,
                           traceUrl: traceUrl || m.traceUrl,
+                          visualizationUrl: visualizationUrl || m.visualizationUrl,
                         }
                       : m
                   )
@@ -662,6 +665,18 @@ function MessageBubble({
           >
             <ExternalLink className="w-3 h-3" />
             View trace on OpenAI
+          </a>
+        )}
+
+        {message.visualizationUrl && (
+          <a
+            href={message.visualizationUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 mt-2"
+          >
+            <ExternalLink className="w-3 h-3" />
+            View visualization
           </a>
         )}
 

@@ -1,0 +1,59 @@
+mcp.amlbot.vareger.com {
+        # Pass API endpoints through untouched (NO rewrite)
+        @api path /api/* /health* /docs* /openapi* /redoc* /favicon.ico
+        handle @api {
+                reverse_proxy mcp-server-http:8001 {
+                        header_up X-User-Id {http.request.header.X-User-Id}
+                }
+        }
+
+        # Streamable HTTP: Cursor POSTs to "/"
+        @mcp_post {
+                method POST
+                path /
+        }
+        handle @mcp_post {
+                rewrite * /mcp
+                reverse_proxy mcp-server-http:8001 {
+                        header_up X-User-Id {http.request.header.X-User-Id}
+                }
+        }
+
+        # SSE fallback: Cursor GETs "/" with event-stream in Accept
+        @mcp_sse {
+                method GET
+                path /
+                header Accept *text/event-stream*
+        }
+        handle @mcp_sse {
+                rewrite * /sse
+                reverse_proxy mcp-server-http:8001 {
+                        header_up X-User-Id {http.request.header.X-User-Id}
+                }
+        }
+
+        # Default
+        handle {
+                reverse_proxy mcp-server-http:8001 {
+                        header_up X-User-Id {http.request.header.X-User-Id}
+                }
+        }
+}
+
+stage.aml-agent.vareger.com {
+        encode gzip
+
+        @api path /api/*
+        handle @api {
+                reverse_proxy aml-agent-api:8000
+        }
+
+        handle {
+                reverse_proxy aml-agent-frontend:3000
+        }
+}
+
+stage.api.aml-agent.vareger.com {
+        encode gzip
+        reverse_proxy aml-agent-api:8000
+}

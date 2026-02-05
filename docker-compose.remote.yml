@@ -1,0 +1,67 @@
+services:
+  mcp-server-http:
+    image: ghcr.io/opun/mcp-server-amlbot:dev
+    container_name: mcp-server-http
+    restart: unless-stopped
+    # Expose only to localhost on the host (NOT public internet)
+    ports:
+      - "127.0.0.1:8001:8001"
+    command: ["--http"]
+    networks:
+      - amlbot-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  aml-agent-api:
+    image: ghcr.io/opun/amlbot-agent-api:latest
+    container_name: aml-agent-api
+    restart: unless-stopped
+    env_file:
+      - .api.env
+    networks:
+      - amlbot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  aml-agent-frontend:
+    image: ghcr.io/opun/amlbot-agent-frontend:latest
+    container_name: aml-agent-frontend
+    restart: unless-stopped
+    env_file:
+      - .next.env
+    networks:
+      - amlbot-network
+    depends_on:
+      - aml-agent-api
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - amlbot-network
+    depends_on:
+      - mcp-server-http
+      - aml-agent-api
+      - aml-agent-frontend
+
+networks:
+  amlbot-network:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

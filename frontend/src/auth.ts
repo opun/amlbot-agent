@@ -15,7 +15,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         }
 
         try {
-          const apiUrl = process.env.NEXT_PUBLIC_API_URL || "https://api-dev.amlbot.rocks";
+          const apiUrl = process.env.AMLBOT_API_URL || "https://api-dev.amlbot.rocks";
           const response = await fetch(`${apiUrl}/api/v2/auth/signin`, {
             method: "POST",
             headers: {

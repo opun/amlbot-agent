@@ -43,25 +43,25 @@ mcp.amlbot.vareger.com {
 stage.aml-agent.vareger.com {
   encode gzip
 
-  # 1) NextAuth must go to the Next.js frontend
+  # NextAuth stays on frontend
   @auth path /api/auth/*
   handle @auth {
     reverse_proxy aml-agent-frontend:3000
   }
 
-  # 2) Your Python API routes
-  @api path /api/chat /api/trace* /docs /redoc /openapi.yaml
+  # Everything that belongs to the Python API (docs/specs included)
+  @api path /api/* /docs* /redoc* /openapi.yaml /openapi.json
   handle @api {
     reverse_proxy aml-agent-api:8000
   }
 
-  # 3) Everything else -> frontend
+  # Default -> frontend (this includes /login)
   handle {
     reverse_proxy aml-agent-frontend:3000
   }
 }
 
 stage.api.aml-agent.vareger.com {
-        encode gzip
-        reverse_proxy aml-agent-api:8000
+  encode gzip
+  reverse_proxy aml-agent-api:8000
 }

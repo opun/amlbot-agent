@@ -3,6 +3,8 @@ services:
     image: ghcr.io/opun/mcp-server-amlbot:dev
     container_name: mcp-server-http
     restart: unless-stopped
+    env_file:
+      - .mcp.env  
     # Expose only to localhost on the host (NOT public internet)
     ports:
       - "127.0.0.1:8001:8001"

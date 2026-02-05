@@ -21,6 +21,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             headers: {
               "Content-Type": "application/json",
             },
+            credentials: "include",
             body: JSON.stringify({
               emailAddress: credentials.email,
               password: credentials.password,
@@ -31,22 +32,51 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             return null;
           }
 
-          const data = await response.json();
+          const data = await response.json().catch(() => null);
 
-          if (!data.success || !data.user) {
+          if (!data?.success || !data?.user) {
             return null;
           }
 
-          // Extract cookies from response headers
-          const cookies = response.headers.get("set-cookie");
-          let userId = "";
+          const userIdCandidates = [
+            data?.user?.id,
+            data?.user?.userId,
+            data?.user?.user_id,
+            data?.user?.uid,
+            data?.userId,
+            data?.user_id,
+            data?.id,
+          ]
+            .map((value: unknown) => (typeof value === "string" ? value.trim() : ""))
+            .filter(Boolean);
 
-          if (cookies) {
-            // Parse userId from cookies
-            const userIdMatch = cookies.match(/userId=([^;]+)/);
-            if (userIdMatch) {
-              userId = userIdMatch[1];
+          let userId = userIdCandidates[0] || "";
+
+          if (!userId) {
+            const headerAny = response.headers as unknown as {
+              getSetCookie?: () => string[];
+              raw?: () => Record<string, string[]>;
+            };
+
+            const setCookieHeaders =
+              headerAny.getSetCookie?.() ||
+              headerAny.raw?.()["set-cookie"] ||
+              (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+
+            if (setCookieHeaders?.length) {
+              for (const cookieHeader of setCookieHeaders) {
+                const userIdMatch = cookieHeader.match(/(?:^|;\s*)userId=([^;]+)/);
+                if (userIdMatch?.[1]) {
+                  userId = userIdMatch[1];
+                  break;
+                }
+              }
             }
+          }
+
+          if (!userId) {
+            console.warn("Auth warning: userId not found in response; falling back to email.");
+            userId = data.user.emailAddress;
           }
 
           // Return user object with userId from cookie
@@ -54,7 +84,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             id: userId || data.user.emailAddress,
             email: data.user.emailAddress,
             name: data.user.fullName,
-            userId: userId,
+            userId,
             user: data.user,
           };
         } catch (error) {
@@ -68,15 +98,18 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     async jwt({ token, user }) {
       // Add userId to token on first sign in
       if (user) {
-        token.userId = (user as any).userId;
+        token.userId = (user as any).userId || (user as any).id || token.sub;
         token.userData = (user as any).user;
+      }
+      if (!token.userId && token.sub) {
+        token.userId = token.sub;
       }
       return token;
     },
     async session({ session, token }) {
       // Add userId to session
       if (token) {
-        (session as any).userId = token.userId;
+        (session as any).userId = token.userId || token.sub;
         (session as any).userData = token.userData;
       }
       return session;

@@ -11,6 +11,7 @@ import time
 from typing import Optional, AsyncGenerator, Dict, Any, List
 from datetime import datetime
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 # Load .env file before anything else
 from dotenv import load_dotenv
@@ -18,7 +19,8 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from pydantic import BaseModel, Field
 import os
 
@@ -119,7 +121,12 @@ app = FastAPI(
     description="API for the AMLBot Crypto Tracing Agent",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
 )
+
+# OpenAPI spec path (served to Swagger/Redoc)
+OPENAPI_PATH = Path(__file__).resolve().parents[2] / "docs" / "openapi.yaml"
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -129,6 +136,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/openapi.yaml", include_in_schema=False)
+async def openapi_yaml():
+    """Serve the curated OpenAPI spec for developer docs."""
+    if not OPENAPI_PATH.exists():
+        raise HTTPException(status_code=500, detail="OpenAPI spec not found")
+    return FileResponse(OPENAPI_PATH, media_type="application/yaml", filename="openapi.yaml")
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui():
+    """Swagger UI for the curated OpenAPI spec."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi.yaml",
+        title="AMLBot Crypto Tracer API Docs",
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_ui():
+    """Redoc UI for the curated OpenAPI spec."""
+    return get_redoc_html(
+        openapi_url="/openapi.yaml",
+        title="AMLBot Crypto Tracer API Docs",
+    )
 
 
 def fast_parse_input(message: str) -> Dict[str, Any]:
@@ -404,7 +437,7 @@ async def _run_trace_http(
     viz_client = None
 
     try:
-        with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+        with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
             tracer = HTTPTracer(http_client)
             progress_queue = asyncio.Queue()
 
@@ -517,7 +550,7 @@ async def _run_trace_stdio(
 
     viz_client = None
 
-    with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+    with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
         async with MCPServerStdio(
             name="AMLBot MCP Server",
             params={

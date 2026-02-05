@@ -54,7 +54,7 @@ async def run_trace(
         trace_id = gen_trace_id()
         print(f"\nView trace: https://platform.openai.com/traces/trace?trace_id={trace_id}\n")
 
-        with trace(workflow_name="Crypto Tracer Agent", trace_id=trace_id):
+        with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
             client = MCPClient(server)
             tracer = MCPTracer(client)
 

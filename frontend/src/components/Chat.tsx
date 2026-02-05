@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useRef, useEffect, FormEvent } from "react";
-import { Send, Loader2, ExternalLink, RotateCcw, CheckCircle2, AlertCircle, Edit3, ArrowRight, StopCircle, Hash, LogOut } from "lucide-react";
+import { Send, Loader2, ExternalLink, RotateCcw, CheckCircle2, AlertCircle, Edit3, ArrowRight, StopCircle, Hash, LogOut, BookOpen, Plug } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { signOut, useSession } from "next-auth/react";
 
@@ -480,6 +481,29 @@ export function Chat() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <a
+            href="/integrations"
+            className="hidden sm:inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-800 bg-gray-900/60 text-xs text-gray-300 hover:text-white hover:border-gray-700 transition-colors"
+            title="Integrations"
+          >
+            <Plug className="w-4 h-4 text-emerald-400" />
+            Integrations
+          </a>
+          <a
+            href="/docs"
+            className="hidden sm:inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300 hover:text-emerald-200 hover:border-emerald-400/60 transition-colors"
+            title="Developer Docs"
+          >
+            <BookOpen className="w-4 h-4" />
+            Developer Docs
+          </a>
+          <a
+            href="/docs"
+            className="sm:hidden inline-flex items-center gap-1 p-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:text-emerald-200 hover:border-emerald-400/60 transition-colors"
+            title="Developer Docs"
+          >
+            <BookOpen className="w-4 h-4" />
+          </a>
           <button
             onClick={clearChat}
             className="p-2 rounded-lg hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
@@ -582,7 +606,7 @@ function MessageBubble({
 
         {(message.status === "complete" || message.status === "error") && (
           <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown>{message.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
           </div>
         )}
 
@@ -655,29 +679,32 @@ function MessageBubble({
           </div>
         )}
 
-        {/* Trace URL link */}
-        {message.traceUrl && (
-          <a
-            href={message.traceUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 mt-2"
-          >
-            <ExternalLink className="w-3 h-3" />
-            View trace on OpenAI
-          </a>
-        )}
-
-        {message.visualizationUrl && (
-          <a
-            href={message.visualizationUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 mt-2"
-          >
-            <ExternalLink className="w-3 h-3" />
-            View visualization
-          </a>
+        {/* Trace links */}
+        {(message.traceUrl || message.visualizationUrl) && (
+          <div className="mt-2 flex flex-wrap gap-3">
+            {message.traceUrl && (
+              <a
+                href={message.traceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300"
+              >
+                <ExternalLink className="w-3 h-3" />
+                View trace on OpenAI
+              </a>
+            )}
+            {message.visualizationUrl && (
+              <a
+                href={message.visualizationUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300"
+              >
+                <ExternalLink className="w-3 h-3" />
+                View visualization
+              </a>
+            )}
+          </div>
         )}
 
         {/* Report details for trace results */}
@@ -685,16 +712,16 @@ function MessageBubble({
           <div className="mt-4 space-y-3">
             {/* Quick stats */}
             {message.report.graph?.paths && (
-              <div className="flex gap-4 text-sm">
-                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+              <div className="flex flex-wrap gap-2 text-sm">
+                <div className="stat-badge bg-gray-800/70 border border-gray-800">
                   <span className="text-gray-400">Paths:</span>{" "}
                   <span className="text-white font-medium">{message.report.graph.paths.length}</span>
                 </div>
-                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+                <div className="stat-badge bg-gray-800/70 border border-gray-800">
                   <span className="text-gray-400">Chain:</span>{" "}
                   <span className="text-white font-medium">{message.report.graph.case_meta?.blockchain_name?.toUpperCase()}</span>
                 </div>
-                <div className="bg-gray-800 px-3 py-2 rounded-lg">
+                <div className="stat-badge bg-gray-800/70 border border-gray-800">
                   <span className="text-gray-400">Asset:</span>{" "}
                   <span className="text-white font-medium">{message.report.graph.case_meta?.asset_symbol}</span>
                 </div>
@@ -703,35 +730,35 @@ function MessageBubble({
 
             {/* Mermaid Diagram - collapsible */}
             {message.report.mermaid && (
-              <details className="group">
-                <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2">
+              <details className="group rounded-lg border border-gray-800 bg-gray-900/40">
+                <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2 px-3 py-2">
                   <span className="group-open:rotate-90 transition-transform">▶</span>
                   📈 View Mermaid Diagram
                 </summary>
-                <div className="mt-2">
+                <div className="px-3 pb-3">
                   <MermaidDiagram chart={message.report.mermaid} />
                 </div>
               </details>
             )}
 
             {/* ASCII Tree - collapsible */}
-            <details className="group">
-              <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2">
+            <details className="group rounded-lg border border-gray-800 bg-gray-900/40">
+              <summary className="cursor-pointer text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-2 px-3 py-2">
                 <span className="group-open:rotate-90 transition-transform">▶</span>
                 📊 View Trace Flow Diagram
               </summary>
-              <div className="ascii-tree mt-2 text-xs overflow-x-auto">
+              <div className="ascii-tree mx-3 mb-3 mt-2 text-xs overflow-x-auto">
                 {message.report.ascii_tree}
               </div>
             </details>
 
             {/* Full Summary - collapsible */}
-            <details>
-              <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300 flex items-center gap-2">
+            <details className="group rounded-lg border border-gray-800 bg-gray-900/30">
+              <summary className="cursor-pointer text-sm text-gray-300 hover:text-gray-200 flex items-center gap-2 px-3 py-2">
                 <span className="group-open:rotate-90 transition-transform">▶</span>
                 📄 View Full Summary
               </summary>
-              <div className="mt-2 text-sm text-gray-300 whitespace-pre-wrap bg-gray-800 p-3 rounded-lg max-h-96 overflow-y-auto">
+              <div className="mx-3 mb-3 mt-2 text-sm text-gray-300 whitespace-pre-wrap bg-gray-800/80 p-3 rounded-lg max-h-96 overflow-y-auto">
                 {message.report.summary_text}
               </div>
             </details>

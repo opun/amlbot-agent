@@ -1,0 +1,588 @@
+openapi: 3.0.3
+info:
+  title: AMLBot Crypto Tracer API
+  version: 0.1.0
+  description: |
+    API for the AMLBot Crypto Tracing Agent.
+    The chat endpoint supports a multi-turn flow that can transition into a streaming trace.
+    Streaming responses use `text/event-stream` with newline-delimited JSON objects.
+servers:
+  - url: http://localhost:8000
+    description: Local development
+tags:
+  - name: Chat
+  - name: Trace
+  - name: Session
+  - name: Health
+components:
+  securitySchemes:
+    UserIdHeader:
+      type: apiKey
+      in: header
+      name: X-User-Id
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+      required: [detail]
+    ChatRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          description: User message to the chat assistant.
+        session_id:
+          type: string
+          nullable: true
+          description: Existing session id to continue a conversation.
+        user_id:
+          type: string
+          nullable: true
+          description: User id from the frontend session (alternative to X-User-Id header).
+      required: [message]
+    CollectedInfo:
+      type: object
+      properties:
+        description:
+          type: string
+        victim_address:
+          type: string
+        blockchain_name:
+          type: string
+          example: eth
+        asset_symbol:
+          type: string
+          example: USDT
+        approx_date:
+          type: string
+          example: "2025-09-25"
+        known_tx_hashes:
+          type: array
+          items:
+            type: string
+        tx_hash:
+          type: string
+        theft_asset:
+          type: string
+    ContinuationOption:
+      type: object
+      properties:
+        address:
+          type: string
+        path_id:
+          type: string
+        last_amount:
+          type: number
+        asset:
+          type: string
+        chain:
+          type: string
+        last_tx_hash:
+          type: string
+        role:
+          type: string
+        risk_score:
+          type: number
+          nullable: true
+        stop_reason:
+          type: string
+        description:
+          type: string
+        bridge_info:
+          type: object
+          additionalProperties: true
+        bridge_error:
+          type: boolean
+      required:
+        - address
+        - path_id
+        - last_amount
+        - asset
+        - chain
+        - last_tx_hash
+        - role
+        - stop_reason
+        - description
+    ChatResponseMessage:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [message]
+        message:
+          type: string
+        session_id:
+          type: string
+        collected_info:
+          $ref: "#/components/schemas/CollectedInfo"
+      required: [type, message, session_id]
+    ChatResponseCollecting:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [collecting]
+        message:
+          type: string
+        session_id:
+          type: string
+        collected_info:
+          $ref: "#/components/schemas/CollectedInfo"
+        missing_fields:
+          type: array
+          items:
+            type: string
+      required: [type, message, session_id, missing_fields]
+    ChatResponseConfirming:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [confirming]
+        message:
+          type: string
+        session_id:
+          type: string
+        collected_info:
+          $ref: "#/components/schemas/CollectedInfo"
+      required: [type, message, session_id]
+    ChatResponseContinuation:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [continuation]
+        message:
+          type: string
+        session_id:
+          type: string
+        continuation_options:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContinuationOption"
+      required: [type, message, session_id, continuation_options]
+    ChatResponse:
+      oneOf:
+        - $ref: "#/components/schemas/ChatResponseMessage"
+        - $ref: "#/components/schemas/ChatResponseCollecting"
+        - $ref: "#/components/schemas/ChatResponseConfirming"
+        - $ref: "#/components/schemas/ChatResponseContinuation"
+    TraceRequest:
+      type: object
+      properties:
+        description:
+          type: string
+        victim_address:
+          type: string
+        blockchain:
+          type: string
+          default: eth
+        asset:
+          type: string
+        date:
+          type: string
+          description: Approximate date (YYYY-MM-DD)
+        tx_hashes:
+          type: array
+          items:
+            type: string
+        tx_hash:
+          type: string
+        theft_asset:
+          type: string
+        user_id:
+          type: string
+          nullable: true
+          description: User id from the frontend session (alternative to X-User-Id header).
+    CaseMeta:
+      type: object
+      properties:
+        case_id:
+          type: string
+        trace_id:
+          type: string
+          nullable: true
+        description:
+          type: string
+        victim_address:
+          type: string
+        blockchain_name:
+          type: string
+        chains:
+          type: array
+          items:
+            type: string
+        asset_symbol:
+          type: string
+        approx_date:
+          type: string
+          nullable: true
+    GraphNode:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          example: address
+        address:
+          type: string
+        chain:
+          type: string
+        role:
+          type: string
+        labels:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          properties:
+            risk_score:
+              type: number
+              nullable: true
+            notes:
+              type: string
+              nullable: true
+    GraphEdge:
+      type: object
+      properties:
+        id:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        tx_hash:
+          type: string
+          nullable: true
+        relation:
+          type: string
+          example: flow
+        chain:
+          type: string
+        asset:
+          type: string
+        amount_estimate:
+          type: number
+        step_type:
+          type: string
+        reasoning:
+          type: string
+          nullable: true
+    GraphPath:
+      type: object
+      properties:
+        path_id:
+          type: string
+        description:
+          type: string
+        total_steps:
+          type: integer
+        last_step_index:
+          type: integer
+          nullable: true
+        last_address:
+          type: string
+          nullable: true
+        stop_reason:
+          type: string
+      required: [path_id, total_steps, stop_reason]
+    GraphComment:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        related_addresses:
+          type: array
+          items:
+            type: string
+        related_steps:
+          type: array
+          items:
+            type: string
+        text:
+          type: string
+    Graph:
+      type: object
+      properties:
+        case_meta:
+          $ref: "#/components/schemas/CaseMeta"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+        paths:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphPath"
+        comments:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphComment"
+    Report:
+      type: object
+      properties:
+        summary_text:
+          type: string
+        ascii_tree:
+          type: string
+        graph:
+          $ref: "#/components/schemas/Graph"
+        mermaid:
+          type: string
+      required: [summary_text, ascii_tree, graph, mermaid]
+    TraceStreamStatus:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [status]
+        message:
+          type: string
+      required: [type, message]
+    TraceStreamStarted:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [trace_started]
+        trace_id:
+          type: string
+        trace_url:
+          type: string
+      required: [type, trace_id, trace_url]
+    TraceStreamResult:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [result]
+        report:
+          $ref: "#/components/schemas/Report"
+        trace_id:
+          type: string
+        trace_url:
+          type: string
+        visualization_url:
+          type: string
+          nullable: true
+        txs_array:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        txlist_array:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        continuation_options:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContinuationOption"
+        can_continue:
+          type: boolean
+      required: [type, report, trace_id, trace_url, can_continue]
+    TraceStreamError:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [error]
+        message:
+          type: string
+      required: [type, message]
+    TraceStreamEvent:
+      oneOf:
+        - $ref: "#/components/schemas/TraceStreamStatus"
+        - $ref: "#/components/schemas/TraceStreamStarted"
+        - $ref: "#/components/schemas/TraceStreamResult"
+        - $ref: "#/components/schemas/TraceStreamError"
+    SessionStateResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        step:
+          type: string
+        collected_info:
+          $ref: "#/components/schemas/CollectedInfo"
+      required: [session_id, step, collected_info]
+    DeleteSessionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: deleted
+      required: [status]
+    HealthSimpleResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: crypto-tracer-api
+      required: [status, service]
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        timestamp:
+          type: string
+        version:
+          type: string
+        active_sessions:
+          type: integer
+      required: [status, timestamp, version, active_sessions]
+paths:
+  /:
+    get:
+      summary: Health check
+      tags: [Health]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthSimpleResponse"
+  /api/chat:
+    post:
+      summary: Chat with the tracing agent
+      description: |
+        Returns JSON for normal chat responses.
+        When the user confirms or continues a trace, the endpoint upgrades to a stream
+        of newline-delimited JSON objects with `text/event-stream`.
+        Authentication: provide `X-User-Id` header, `user_id` in the request body,
+        or a `userId` cookie.
+      tags: [Chat]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Chat response or trace stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: Newline-delimited JSON objects. Each line matches TraceStreamEvent.
+                example: |
+                  {"type":"status","message":"Starting MCP server..."}
+                  {"type":"trace_started","trace_id":"trace_x","trace_url":"https://platform.openai.com/traces/trace?trace_id=trace_x"}
+                  {"type":"result","trace_id":"trace_x","trace_url":"https://platform.openai.com/traces/trace?trace_id=trace_x","can_continue":false,"report":{"summary_text":"...","ascii_tree":"...","mermaid":"flowchart TD","graph":{"case_meta":{"case_id":"case-123","victim_address":"0x...","blockchain_name":"eth","chains":["eth"],"asset_symbol":"USDT"},"nodes":[],"edges":[],"paths":[],"comments":[]}}}
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/trace:
+    post:
+      summary: Start a trace (streaming)
+      description: |
+        Returns a `text/event-stream` of JSON lines as the trace progresses.
+        Authentication: provide `X-User-Id` header, `user_id` in the request body,
+        or a `userId` cookie.
+      tags: [Trace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TraceRequest"
+      responses:
+        "200":
+          description: Trace stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Newline-delimited JSON objects. Each line matches TraceStreamEvent.
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/session/{session_id}:
+    get:
+      summary: Get session state
+      tags: [Session]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionStateResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Delete session
+      tags: [Session]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteSessionResponse"
+  /api/health:
+    get:
+      summary: Detailed health check
+      tags: [Health]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"

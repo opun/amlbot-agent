@@ -1,0 +1,72 @@
+name: Build and Push AMLBot Agent
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - v*
+
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - main
+
+env:
+  REGISTRY: ghcr.io
+  API_IMAGE_NAME: amlbot-agent-api
+  FRONTEND_IMAGE_NAME: amlbot-agent-frontend
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Prepare Image ID and Version
+        id: prep
+        run: |
+          # Process API Image
+          API_IMAGE_ID=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.API_IMAGE_NAME }}
+          API_IMAGE_ID=$(echo $API_IMAGE_ID | tr '[A-Z]' '[a-z]')
+
+          # Process Frontend Image
+          FE_IMAGE_ID=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE_NAME }}
+          FE_IMAGE_ID=$(echo $FE_IMAGE_ID | tr '[A-Z]' '[a-z]')
+
+          # Strip git ref prefix from the version.
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+          # Strip "v" prefix from the tag name.
+          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          # Use Docker `latest` tag convention for main branch
+          [ "$VERSION" == "main" ] && VERSION=latest
+
+          echo "api_image_id=$API_IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "fe_image_id=$FE_IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and Push API image
+        run: |
+          IMAGE_TAG=${{ steps.prep.outputs.api_image_id }}:${{ steps.prep.outputs.version }}
+          docker build . --file Dockerfile.api --tag $IMAGE_TAG --label "runnumber=${GITHUB_RUN_ID}"
+          docker push $IMAGE_TAG
+
+      - name: Build and Push Frontend image
+        run: |
+          IMAGE_TAG=${{ steps.prep.outputs.fe_image_id }}:${{ steps.prep.outputs.version }}
+          docker build ./frontend --file ./frontend/Dockerfile.frontend --tag $IMAGE_TAG --label "runnumber=${GITHUB_RUN_ID}"
+          docker push $IMAGE_TAG

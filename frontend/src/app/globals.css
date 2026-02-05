@@ -1,0 +1,168 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+  background: #1a1a1a;
+  border-radius: 8px;
+  padding: 16px;
+  overflow-x: auto;
+}
+
+/* Markdown styling */
+.prose {
+  color: var(--foreground);
+}
+
+.prose h1, .prose h2, .prose h3 {
+  color: white;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose p {
+  margin-bottom: 1em;
+}
+
+.prose code {
+  background: #1a1a1a;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.prose pre {
+  background: #1a1a1a;
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.prose ul, .prose ol {
+  margin-left: 1.5em;
+  margin-bottom: 1em;
+}
+
+.prose li {
+  margin-bottom: 0.5em;
+}
+
+/* Animation for loading */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ASCII Tree styling */
+.ascii-tree {
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+  padding: 16px;
+  border-radius: 8px;
+  color: #10b981;
+  border: 1px solid #30363d;
+}
+
+/* Table styling for markdown */
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+.prose th, .prose td {
+  padding: 8px 12px;
+  border: 1px solid #333;
+  text-align: left;
+}
+
+.prose th {
+  background: #1a1a1a;
+  font-weight: 600;
+  color: #888;
+}
+
+.prose td {
+  background: #111;
+}
+
+.prose tr:hover td {
+  background: #1a1a1a;
+}
+
+/* Details/summary styling */
+details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+details summary::-webkit-details-marker {
+  display: none;
+}
+
+details[open] summary {
+  margin-bottom: 8px;
+}
+
+/* Stats badges */
+.stat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #1a1a1a;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* Blockquote styling */
+.prose blockquote {
+  border-left: 3px solid #10b981;
+  padding-left: 1em;
+  margin: 1em 0;
+  color: #888;
+  font-style: italic;
+}

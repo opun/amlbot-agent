@@ -1,0 +1,1856 @@
+{
+  "success": true,
+  "data": {
+    "title": "40393673605",
+    "type": "address",
+    "extras": {},
+    "payload": {
+      "comments": [
+        {
+          "author": "User",
+          "date": 1753455836.249,
+          "descriptor": "«r2»0",
+          "text": "HiFiSwap bridge",
+          "type": "comment",
+          "width": 136,
+          "height": 35,
+          "isManuallyMoved": true,
+          "typeOfComment": "comment",
+          "color": "#77869E",
+          "x": 613.9298305345346,
+          "y": 148.43109822555022
+        },
+        {
+          "author": "User",
+          "date": 1753455965.332,
+          "descriptor": "«r2»1",
+          "text": "Perpetrator's address",
+          "type": "comment",
+          "width": 136,
+          "height": 35,
+          "isManuallyMoved": true,
+          "typeOfComment": "comment",
+          "color": "#77869E",
+          "x": -174.2976229465404,
+          "y": 177.6507020680171
+        }
+      ],
+      "connects": [
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0x9b25d5951bb6f0cb126486af9b7bdb132ae487bc0d00281b1d41c8e94145be3b-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x9b25d5951bb6f0cb126486af9b7bdb132ae487bc0d00281b1d41c8e94145be3b-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0xb50626adbfbd68b50fa1c36d10e7c58d7ee0c187d2a29bd5d4fd6f78a2042c25-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xb50626adbfbd68b50fa1c36d10e7c58d7ee0c187d2a29bd5d4fd6f78a2042c25-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0x621d26bc789f85f54329ad3afba0189c04ac208acd3667ab7c3741a05d56021a-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x621d26bc789f85f54329ad3afba0189c04ac208acd3667ab7c3741a05d56021a-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0xecdf18b6680318d949e8bd9d17b4e123a84c193c0058e4e169b8b05aede24324-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xecdf18b6680318d949e8bd9d17b4e123a84c193c0058e4e169b8b05aede24324-eth-94252-0",
+          "target": "0xc7c22552aeb83bd88c977929f3ba118958877e90-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0x817dbdab3fb4b0c7bc484289e91822e9c84e530d320a2d033f5d67211e37ba63-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x817dbdab3fb4b0c7bc484289e91822e9c84e530d320a2d033f5d67211e37ba63-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0x97cd6094c6aafaf645904ff2d775b2d65dbb2f94fe7c24d2d42ca396c5585378-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 0.999,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x97cd6094c6aafaf645904ff2d775b2d65dbb2f94fe7c24d2d42ca396c5585378-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 0.999,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "target": "0x6b38ef05764c2990b28478fec402f606ca523419fb1b15253b1cdd7bd340a6e3-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x6b38ef05764c2990b28478fec402f606ca523419fb1b15253b1cdd7bd340a6e3-eth-94252-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "target": "0xdd4ec0c477849717fd323007644bf9e2cfb3120623c38969e76b0de20573e613-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xdd4ec0c477849717fd323007644bf9e2cfb3120623c38969e76b0de20573e613-eth-94252-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "target": "0x642400ae5bf87170bcb269051ccdfa7bc2a5bdb8f069ae129a761aa79c62fc05-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x642400ae5bf87170bcb269051ccdfa7bc2a5bdb8f069ae129a761aa79c62fc05-eth-94252-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "target": "0x0051b925dce2089f689d3f0af90c4dcbfb9759b8ea789b60dd410f62269003d2-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x0051b925dce2089f689d3f0af90c4dcbfb9759b8ea789b60dd410f62269003d2-eth-94252-0",
+          "target": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "target": "0xab39e7fe6a91b080997d35aff2859c7bbf384203a3def2fb51ef79c55a8c65ff-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xab39e7fe6a91b080997d35aff2859c7bbf384203a3def2fb51ef79c55a8c65ff-eth-94252-0",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-eth-94252",
+          "target": "0xf10b72a053b3899ee63ace05ef83f3172d0bc4635607d90bdde2bca182296015-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xf10b72a053b3899ee63ace05ef83f3172d0bc4635607d90bdde2bca182296015-eth-94252-0",
+          "target": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0xeb1e0a041a28531ccb23434bb7816a7988a0e7a4bc59f28dc8841e17a597498c-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xeb1e0a041a28531ccb23434bb7816a7988a0e7a4bc59f28dc8841e17a597498c-eth-94252-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "target": "0xb79c77da85e3fc7850ca1104f26354fe305386cdc46636f6d1b03aecc11adb2f-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xb79c77da85e3fc7850ca1104f26354fe305386cdc46636f6d1b03aecc11adb2f-eth-94252-0",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "target": "0xbed6776f8dc881e53437204e5305f62884bfc77ed141f631ff8f3500d57a7aa3-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xbed6776f8dc881e53437204e5305f62884bfc77ed141f631ff8f3500d57a7aa3-eth-94252-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "target": "0xe0399ef8f963afce013096161e3e706688a02412ea5317c8b38e906566595486-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xe0399ef8f963afce013096161e3e706688a02412ea5317c8b38e906566595486-eth-94252-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "target": "0x5fbe1ad763a7df1d124f8619e47346f443a3e1a2b73d24a5230449f552523167-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x5fbe1ad763a7df1d124f8619e47346f443a3e1a2b73d24a5230449f552523167-eth-94252-0",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1.001,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "«r2»0",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "color": "#C2C6CE",
+            "type": "smoothstep",
+            "hovered": false
+          }
+        },
+        {
+          "source": "«r2»0",
+          "target": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7-eth-94252",
+          "data": {
+            "color": "#C2C6CE",
+            "type": "smoothstep",
+            "hovered": false
+          }
+        },
+        {
+          "source": "0xc7c22552aeb83bd88c977929f3ba118958877e90-eth-94252",
+          "target": "0x449ed4faf5c280dd89f8803f353dd43c9a13bcadd5ac39c2e7ea28a63aeec803-eth-94252-0",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "source": "0x449ed4faf5c280dd89f8803f353dd43c9a13bcadd5ac39c2e7ea28a63aeec803-eth-94252-0",
+          "target": "0xb685760ebd368a891f27ae547391f4e2a289895b-eth-94252",
+          "data": {
+            "currency": "eth",
+            "amount": null,
+            "fiatRate": 1,
+            "token_id": 94252,
+            "color": "#00ACFF",
+            "isNew": true,
+            "isNeedReverse": false,
+            "hovered": false
+          }
+        },
+        {
+          "id": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "mergedEdge",
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "data": {
+            "input": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+            "output": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "type": "mergedEdge",
+          "source": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "target": "0xc7c22552aeb83bd88c977929f3ba118958877e90-eth-94252",
+          "data": {
+            "input": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+            "output": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "mergedEdge",
+          "source": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "input": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+            "output": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "type": "mergedEdge",
+          "source": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "target": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-eth-94252",
+          "data": {
+            "input": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+            "output": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-0x542ea24291c682cfdc6a686fb63d709779963e00",
+          "type": "mergedEdge",
+          "source": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "input": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+            "output": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "type": "mergedEdge",
+          "source": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-eth-94252",
+          "target": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7-eth-94252",
+          "data": {
+            "input": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+            "output": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0x2e856c940efe52207527d6d91fe67baf62df8687-0x542ea24291c682cfdc6a686fb63d709779963e00",
+          "type": "mergedEdge",
+          "source": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "target": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "data": {
+            "input": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+            "output": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0x2e856c940efe52207527d6d91fe67baf62df8687-0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "mergedEdge",
+          "source": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "target": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "data": {
+            "input": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+            "output": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "id": "0xc7c22552aeb83bd88c977929f3ba118958877e90-0xb685760ebd368a891f27ae547391f4e2a289895b",
+          "type": "mergedEdge",
+          "source": "0xc7c22552aeb83bd88c977929f3ba118958877e90-eth-94252",
+          "target": "0xb685760ebd368a891f27ae547391f4e2a289895b-eth-94252",
+          "data": {
+            "input": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+            "output": "0xb685760ebd368a891f27ae547391f4e2a289895b",
+            "color": "#00ACFF"
+          }
+        },
+        {
+          "source": "«r2»1",
+          "target": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "data": {
+            "color": "#C2C6CE",
+            "type": "smoothstep",
+            "hovered": false
+          }
+        },
+        {
+          "source": "«r2»1",
+          "target": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "data": {
+            "color": "#C2C6CE",
+            "type": "smoothstep",
+            "hovered": false
+          }
+        }
+      ],
+      "items": [
+        {
+          "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+          "descriptor": "0xa4fa73eea6fc0666d40287bd919da6bd10521344-eth-0",
+          "x": 17.5,
+          "y": 250,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "riskScore": 0.338,
+            "owner": null,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+          "descriptor": "0xc65e41d460e877216bbc7dd31c52da553075bf6a-eth-0",
+          "x": 17.5,
+          "y": 90.93432944060906,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "riskScore": 0.331,
+            "owner": null,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "descriptor": "0x2e856c940efe52207527d6d91fe67baf62df8687-eth-94252",
+          "x": 252.5,
+          "y": 90.93432944060906,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": null,
+            "riskScore": 0.337,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "descriptor": "0xc7c22552aeb83bd88c977929f3ba118958877e90-eth-94252",
+          "x": 252.5,
+          "y": -67.90878339486781,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": null,
+            "riskScore": 0.363,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "descriptor": "0x2f6af645400d42d054dc87a6cda890988ef1aae6-eth-94252",
+          "x": 252.5,
+          "y": 250,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": null,
+            "riskScore": 0.397,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "descriptor": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d-eth-94252",
+          "x": 505.1981016485844,
+          "y": 241.3979120978774,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": null,
+            "riskScore": 0.455,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+          "descriptor": "0x542ea24291c682cfdc6a686fb63d709779963e00-eth-94252",
+          "x": 505.1981016485844,
+          "y": 93.01123104359152,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": {
+              "first_activity": 1734317387,
+              "global_id": 96960,
+              "id": 357541524,
+              "last_activity": 1760189459,
+              "name": "HiFiSwap",
+              "size": 3,
+              "slug": "HiFiSwap",
+              "status": "active",
+              "subtype": null,
+              "type": "exchange_unlicensed"
+            },
+            "riskScore": 0.6,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "descriptor": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7-eth-94252",
+          "x": 708.4749808799896,
+          "y": 241.3979120978774,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": {
+              "first_activity": 1734317387,
+              "global_id": 96960,
+              "id": 357541524,
+              "last_activity": 1760189459,
+              "name": "HiFiSwap",
+              "size": 3,
+              "slug": "HiFiSwap",
+              "status": "active",
+              "subtype": null,
+              "type": "exchange_unlicensed"
+            },
+            "riskScore": 0.6,
+            "type": "address"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        },
+        {
+          "address": "0xb685760ebd368a891f27ae547391f4e2a289895b",
+          "descriptor": "0xb685760ebd368a891f27ae547391f4e2a289895b-eth-94252",
+          "x": 447.9739661887427,
+          "y": -67.90878339486781,
+          "extend": {
+            "currency": "eth",
+            "token_id": 94252,
+            "owner": {
+              "global_id": 86455,
+              "id": 346809816,
+              "name": "Bridgers",
+              "slug": "Bridgers",
+              "subtype": null,
+              "type": "p2p_exchange_unlicensed"
+            },
+            "riskScore": 0.6,
+            "type": "contract"
+          },
+          "type": "address",
+          "isManuallyMoved": true
+        }
+      ],
+      "transform": {
+        "k": 1,
+        "x": 0,
+        "y": 0
+      },
+      "txs": [
+        {
+          "currency": "eth",
+          "descriptor": "0x9b25d5951bb6f0cb126486af9b7bdb132ae487bc0d00281b1d41c8e94145be3b-eth-94252-0",
+          "hash": "0x9b25d5951bb6f0cb126486af9b7bdb132ae487bc0d00281b1d41c8e94145be3b",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xb50626adbfbd68b50fa1c36d10e7c58d7ee0c187d2a29bd5d4fd6f78a2042c25-eth-94252-0",
+          "hash": "0xb50626adbfbd68b50fa1c36d10e7c58d7ee0c187d2a29bd5d4fd6f78a2042c25",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x621d26bc789f85f54329ad3afba0189c04ac208acd3667ab7c3741a05d56021a-eth-94252-0",
+          "hash": "0x621d26bc789f85f54329ad3afba0189c04ac208acd3667ab7c3741a05d56021a",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xecdf18b6680318d949e8bd9d17b4e123a84c193c0058e4e169b8b05aede24324-eth-94252-0",
+          "hash": "0xecdf18b6680318d949e8bd9d17b4e123a84c193c0058e4e169b8b05aede24324",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x817dbdab3fb4b0c7bc484289e91822e9c84e530d320a2d033f5d67211e37ba63-eth-94252-0",
+          "hash": "0x817dbdab3fb4b0c7bc484289e91822e9c84e530d320a2d033f5d67211e37ba63",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x97cd6094c6aafaf645904ff2d775b2d65dbb2f94fe7c24d2d42ca396c5585378-eth-94252-0",
+          "hash": "0x97cd6094c6aafaf645904ff2d775b2d65dbb2f94fe7c24d2d42ca396c5585378",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x6b38ef05764c2990b28478fec402f606ca523419fb1b15253b1cdd7bd340a6e3-eth-94252-0",
+          "hash": "0x6b38ef05764c2990b28478fec402f606ca523419fb1b15253b1cdd7bd340a6e3",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xa4fa73eea6fc0666d40287bd919da6bd105213440x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xdd4ec0c477849717fd323007644bf9e2cfb3120623c38969e76b0de20573e613-eth-94252-0",
+          "hash": "0xdd4ec0c477849717fd323007644bf9e2cfb3120623c38969e76b0de20573e613",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xa4fa73eea6fc0666d40287bd919da6bd105213440x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x642400ae5bf87170bcb269051ccdfa7bc2a5bdb8f069ae129a761aa79c62fc05-eth-94252-0",
+          "hash": "0x642400ae5bf87170bcb269051ccdfa7bc2a5bdb8f069ae129a761aa79c62fc05",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xa4fa73eea6fc0666d40287bd919da6bd105213440x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x0051b925dce2089f689d3f0af90c4dcbfb9759b8ea789b60dd410f62269003d2-eth-94252-0",
+          "hash": "0x0051b925dce2089f689d3f0af90c4dcbfb9759b8ea789b60dd410f62269003d2",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xab39e7fe6a91b080997d35aff2859c7bbf384203a3def2fb51ef79c55a8c65ff-eth-94252-0",
+          "hash": "0xab39e7fe6a91b080997d35aff2859c7bbf384203a3def2fb51ef79c55a8c65ff",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x542ea24291c682cfdc6a686fb63d709779963e00",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xf10b72a053b3899ee63ace05ef83f3172d0bc4635607d90bdde2bca182296015-eth-94252-0",
+          "hash": "0xf10b72a053b3899ee63ace05ef83f3172d0bc4635607d90bdde2bca182296015",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xeb1e0a041a28531ccb23434bb7816a7988a0e7a4bc59f28dc8841e17a597498c-eth-94252-0",
+          "hash": "0xeb1e0a041a28531ccb23434bb7816a7988a0e7a4bc59f28dc8841e17a597498c",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xb79c77da85e3fc7850ca1104f26354fe305386cdc46636f6d1b03aecc11adb2f-eth-94252-0",
+          "hash": "0xb79c77da85e3fc7850ca1104f26354fe305386cdc46636f6d1b03aecc11adb2f",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2e856c940efe52207527d6d91fe67baf62df86870x542ea24291c682cfdc6a686fb63d709779963e00",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xbed6776f8dc881e53437204e5305f62884bfc77ed141f631ff8f3500d57a7aa3-eth-94252-0",
+          "hash": "0xbed6776f8dc881e53437204e5305f62884bfc77ed141f631ff8f3500d57a7aa3",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2e856c940efe52207527d6d91fe67baf62df86870x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0xe0399ef8f963afce013096161e3e706688a02412ea5317c8b38e906566595486-eth-94252-0",
+          "hash": "0xe0399ef8f963afce013096161e3e706688a02412ea5317c8b38e906566595486",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2e856c940efe52207527d6d91fe67baf62df86870x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x5fbe1ad763a7df1d124f8619e47346f443a3e1a2b73d24a5230449f552523167-eth-94252-0",
+          "hash": "0x5fbe1ad763a7df1d124f8619e47346f443a3e1a2b73d24a5230449f552523167",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x542ea24291c682cfdc6a686fb63d709779963e00",
+          "type": "txEth"
+        },
+        {
+          "currency": "eth",
+          "descriptor": "0x449ed4faf5c280dd89f8803f353dd43c9a13bcadd5ac39c2e7ea28a63aeec803-eth-94252-0",
+          "hash": "0x449ed4faf5c280dd89f8803f353dd43c9a13bcadd5ac39c2e7ea28a63aeec803",
+          "token_id": 94252,
+          "x": 0,
+          "y": 0,
+          "color": "#00ACFF",
+          "path": "0",
+          "parentNode": "0xc7c22552aeb83bd88c977929f3ba118958877e900xb685760ebd368a891f27ae547391f4e2a289895b",
+          "type": "txEth"
+        },
+        {
+          "descriptor": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "hash": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "input": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+          "output": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "hash": "0xc65e41d460e877216bbc7dd31c52da553075bf6a0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "input": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+          "output": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0xa4fa73eea6fc0666d40287bd919da6bd105213440x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "hash": "0xa4fa73eea6fc0666d40287bd919da6bd105213440x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "input": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+          "output": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "hash": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "input": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "output": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x542ea24291c682cfdc6a686fb63d709779963e00",
+          "hash": "0x2f6af645400d42d054dc87a6cda890988ef1aae60x542ea24291c682cfdc6a686fb63d709779963e00",
+          "input": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "output": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "hash": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "input": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+          "output": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0x2e856c940efe52207527d6d91fe67baf62df86870x542ea24291c682cfdc6a686fb63d709779963e00",
+          "hash": "0x2e856c940efe52207527d6d91fe67baf62df86870x542ea24291c682cfdc6a686fb63d709779963e00",
+          "input": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "output": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0x2e856c940efe52207527d6d91fe67baf62df86870x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "hash": "0x2e856c940efe52207527d6d91fe67baf62df86870x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "input": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+          "output": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        },
+        {
+          "descriptor": "0xc7c22552aeb83bd88c977929f3ba118958877e900xb685760ebd368a891f27ae547391f4e2a289895b",
+          "hash": "0xc7c22552aeb83bd88c977929f3ba118958877e900xb685760ebd368a891f27ae547391f4e2a289895b",
+          "input": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+          "output": "0xb685760ebd368a891f27ae547391f4e2a289895b",
+          "x": 0,
+          "y": 0,
+          "type": "mergedTx"
+        }
+      ]
+    },
+    "helpers": {
+      "currencyInfo": [
+        {
+          "currency": "eth",
+          "issuer": null,
+          "name": "Ethereum",
+          "symbol": "eth",
+          "token_id": 0,
+          "unit": 9
+        },
+        {
+          "currency": "eth",
+          "issuer": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "name": "Tether USD",
+          "symbol": "USDT",
+          "token_id": 94252,
+          "unit": 6
+        }
+      ],
+      "txList": [
+        {
+          "inputs": [
+            {
+              "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+              "riskscore": 0.315,
+              "type": "address"
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+              "owner": {
+                "id": 31458309,
+                "name": "Tether USD (USDT)",
+                "slug": "Tether-USD-USDT",
+                "subtype": "ERC/BEP-20 Token Contract",
+                "type": "other"
+              },
+              "riskscore": 0.25,
+              "type": "contract"
+            }
+          ],
+          "hash": "0x508a5d7852cbcb580438d06e9c02d8981a8b82d918f715355de20451c6a40f2d",
+          "fiatRate": 1989.715,
+          "addressesCount": 2,
+          "amount": 0,
+          "fee": 66048.185696532,
+          "currency": "eth",
+          "tokenId": 0,
+          "poolTime": 1742647379,
+          "date": 1742647379,
+          "path": null,
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xb15e9352d973dccab6974c8ede82168918f15a70",
+              "riskscore": 0.33,
+              "type": "address"
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+              "riskscore": 0.315,
+              "type": "address"
+            }
+          ],
+          "hash": "0xbe9c1f88e5e0f435b3dd0de200bf205733a6e52a9e2073672a8db8613a5cb050",
+          "fiatRate": 2651.809,
+          "addressesCount": 2,
+          "amount": 11300000,
+          "fee": 20423.766111,
+          "currency": "eth",
+          "tokenId": 0,
+          "poolTime": 1739183579,
+          "date": 1739183579,
+          "path": null,
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0x9b25d5951bb6f0cb126486af9b7bdb132ae487bc0d00281b1d41c8e94145be3b",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 3150000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736340035,
+          "date": 1736340035,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0xeb1e0a041a28531ccb23434bb7816a7988a0e7a4bc59f28dc8841e17a597498c",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 5504000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1737565463,
+          "date": 1737565463,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0xb50626adbfbd68b50fa1c36d10e7c58d7ee0c187d2a29bd5d4fd6f78a2042c25",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 1720000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736510351,
+          "date": 1736510351,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0x621d26bc789f85f54329ad3afba0189c04ac208acd3667ab7c3741a05d56021a",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 1030000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1735896791,
+          "date": 1735896791,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+              "riskscore": 0.233
+            }
+          ],
+          "hash": "0xecdf18b6680318d949e8bd9d17b4e123a84c193c0058e4e169b8b05aede24324",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 6629352369,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1738426931,
+          "date": 1738426931,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0x817dbdab3fb4b0c7bc484289e91822e9c84e530d320a2d033f5d67211e37ba63",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 501000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736490323,
+          "date": 1736490323,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "hash": "0x97cd6094c6aafaf645904ff2d775b2d65dbb2f94fe7c24d2d42ca396c5585378",
+          "fiatRate": 0.999,
+          "addressesCount": 2,
+          "amount": 1010000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1735571435,
+          "date": 1735571435,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x8387d475a686b40cece837910fc57cfa79810f18",
+              "riskscore": 0.371
+            }
+          ],
+          "hash": "0x53eea46ef5c5d2c8a4aabd32d6dc0631eeff73ece9293a98a0993b8cc260ac0d",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 20000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736508191,
+          "date": 1736508191,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x5241fc4c198900aaa087f7e992114a437db6edac",
+              "riskscore": 0.324
+            }
+          ],
+          "hash": "0x23c76a267c2e29b2c0377e6b7078357c892071c9dc72905cf74ed4f242b7fa65",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 10000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736097695,
+          "date": 1736097695,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc65e41d460e877216bbc7dd31c52da553075bf6a",
+              "riskscore": 0.312
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x6a485c6c6dccabf03c4cac86a3b0b355105db92e",
+              "riskscore": 0.389
+            }
+          ],
+          "hash": "0x8b76522d025ef62a8c5832b48cf7c99ed3341e0d0828a6a1988c79483e10468d",
+          "fiatRate": 0.999,
+          "addressesCount": 2,
+          "amount": 3366014209,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1737027263,
+          "date": 1737027263,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+              "riskscore": 0.315
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "hash": "0x6b38ef05764c2990b28478fec402f606ca523419fb1b15253b1cdd7bd340a6e3",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 2500000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1739185679,
+          "date": 1739185679,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+              "riskscore": 0.315
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "hash": "0xdd4ec0c477849717fd323007644bf9e2cfb3120623c38969e76b0de20573e613",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 10020000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1741705091,
+          "date": 1741705091,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xa4fa73eea6fc0666d40287bd919da6bd10521344",
+              "riskscore": 0.315
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "hash": "0x642400ae5bf87170bcb269051ccdfa7bc2a5bdb8f069ae129a761aa79c62fc05",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 18400000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1741084499,
+          "date": 1741084499,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+              "riskscore": 0.453
+            }
+          ],
+          "hash": "0x0051b925dce2089f689d3f0af90c4dcbfb9759b8ea789b60dd410f62269003d2",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 10220000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1741708273,
+          "date": 1741708271,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.397
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+              "owner": {
+                "global_id": 96960,
+                "id": 357541524,
+                "name": "HiFiSwap",
+                "slug": "HiFiSwap",
+                "subtype": null,
+                "type": "exchange_unlicensed"
+              },
+              "riskscore": 0.6
+            }
+          ],
+          "hash": "0xab39e7fe6a91b080997d35aff2859c7bbf384203a3def2fb51ef79c55a8c65ff",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 19999000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1741084691,
+          "date": 1741084691,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xb410231cb04ced2a3d6a84c5ca6e069b1731591a",
+              "riskscore": 0.318
+            }
+          ],
+          "hash": "0x36c71ce34bc852775205423b1ae3179239aeecf19280352017f187feb99d10ab",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 6088000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1739230559,
+          "date": 1739230559,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x482a3e7cb279c5ccfe2cc211f77b8df608158b9d",
+              "riskscore": 0.455
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x0280baf5c87cfa44d7d661805cc17db29d7973b7",
+              "owner": {
+                "global_id": 96960,
+                "id": 357541524,
+                "name": "HiFiSwap",
+                "slug": "HiFiSwap",
+                "subtype": null,
+                "type": "exchange_unlicensed"
+              },
+              "riskscore": 0.6
+            }
+          ],
+          "hash": "0xf10b72a053b3899ee63ace05ef83f3172d0bc4635607d90bdde2bca182296015",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 23730000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1742631707,
+          "date": 1742631707,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.337
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+              "owner": {
+                "global_id": 96960,
+                "id": 357541524,
+                "name": "HiFiSwap",
+                "slug": "HiFiSwap",
+                "subtype": null,
+                "type": "exchange_unlicensed"
+              },
+              "riskscore": 0.6
+            }
+          ],
+          "hash": "0xb79c77da85e3fc7850ca1104f26354fe305386cdc46636f6d1b03aecc11adb2f",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 5504000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1737565871,
+          "date": 1737565871,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "hash": "0xbed6776f8dc881e53437204e5305f62884bfc77ed141f631ff8f3500d57a7aa3",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 7951000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736340179,
+          "date": 1736340179,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xb410231cb04ced2a3d6a84c5ca6e069b1731591a",
+              "riskscore": 0.318
+            }
+          ],
+          "hash": "0x6547661cf3900854f88b01e0c917fae52af2fdb3e9d896f2786c7c20dfb30548",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 7026000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736582471,
+          "date": 1736582471,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2e856c940efe52207527d6d91fe67baf62df8687",
+              "riskscore": 0.308
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.432
+            }
+          ],
+          "hash": "0xe0399ef8f963afce013096161e3e706688a02412ea5317c8b38e906566595486",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 6400000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1735586171,
+          "date": 1735586171,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x2f6af645400d42d054dc87a6cda890988ef1aae6",
+              "riskscore": 0.397
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0x542ea24291c682cfdc6a686fb63d709779963e00",
+              "owner": {
+                "global_id": 96960,
+                "id": 357541524,
+                "name": "HiFiSwap",
+                "slug": "HiFiSwap",
+                "subtype": null,
+                "type": "exchange_unlicensed"
+              },
+              "riskscore": 0.6
+            }
+          ],
+          "hash": "0x5fbe1ad763a7df1d124f8619e47346f443a3e1a2b73d24a5230449f552523167",
+          "fiatRate": 1.001,
+          "addressesCount": 2,
+          "amount": 7951000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1736340239,
+          "date": 1736340239,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0xc7c22552aeb83bd88c977929f3ba118958877e90",
+              "riskscore": 0.233
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xb685760ebd368a891f27ae547391f4e2a289895b",
+              "owner": {
+                "global_id": 86455,
+                "id": 346809816,
+                "name": "Bridgers",
+                "slug": "Bridgers",
+                "subtype": null,
+                "type": "p2p_exchange_unlicensed"
+              },
+              "riskscore": 0.6
+            }
+          ],
+          "hash": "0x449ed4faf5c280dd89f8803f353dd43c9a13bcadd5ac39c2e7ea28a63aeec803",
+          "fiatRate": 1,
+          "addressesCount": 2,
+          "amount": 6629350000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1738427771,
+          "date": 1738427771,
+          "path": "0",
+          "type": "txEth"
+        },
+        {
+          "inputs": [
+            {
+              "address": "0x6a485c6c6dccabf03c4cac86a3b0b355105db92e",
+              "riskscore": 0.389
+            }
+          ],
+          "outputs": [
+            {
+              "address": "0xb410231cb04ced2a3d6a84c5ca6e069b1731591a",
+              "riskscore": 0.318
+            }
+          ],
+          "hash": "0xbe16e046acee2de9b7538397edf85db524a2ecd34227ac7e77da85864ce7a1a0",
+          "fiatRate": 0.999,
+          "addressesCount": 2,
+          "amount": 3366000000,
+          "currency": "eth",
+          "tokenId": 94252,
+          "poolTime": 1737028187,
+          "date": 1737028187,
+          "path": "0",
+          "type": "txEth"
+        }
+      ],
+      "isFiatMode": false,
+      "isMergedTxMode": true,
+      "isConnectionBasedMode": false,
+      "interactionTxsStatsList": {},
+      "blockList": [],
+      "labels": []
+    }
+  }
+}

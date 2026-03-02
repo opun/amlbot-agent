@@ -11,6 +11,9 @@ class TracerConfig(BaseModel):
     known_tx_hashes: List[str] = Field(default_factory=list)
     tx_hash: Optional[str] = None
     theft_asset: Optional[str] = None
+    stolen_amount: Optional[float] = None
+    cex_single_cluster_threshold: float = 0.60
+    traced_amount_tolerance: float = 0.03
 
 class CaseMeta(BaseModel):
     case_id: str
@@ -38,6 +41,7 @@ class Step(BaseModel):
     service_label: Optional[str] = None
     protocol: Optional[str] = None
     reasoning: Optional[str] = None  # Explanation for why this transaction was selected
+    attributed_amount: Optional[float] = None  # FIFO-attributed theft-origin share
 
 class Path(BaseModel):
     path_id: str
@@ -65,6 +69,8 @@ class TraceStats(BaseModel):
     initial_amount_estimate: float
     explored_paths: int
     terminated_reason: Optional[str] = None
+    total_traced_amount: Optional[float] = None
+    stolen_amount: Optional[float] = None
 
 class TraceResult(BaseModel):
     case_meta: CaseMeta

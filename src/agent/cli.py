@@ -27,7 +27,10 @@ async def run_trace(
     date: Optional[str] = None,
     tx_hashes: Optional[str] = None,
     tx_hash: Optional[str] = None,
-    theft_asset: Optional[str] = None
+    theft_asset: Optional[str] = None,
+    stolen_amount: Optional[float] = None,
+    cex_single_cluster_threshold: Optional[float] = None,
+    traced_amount_tolerance: Optional[float] = None
 ):
     if victim_address and tx_hash:
         print(f"Starting trace for transaction {tx_hash} (victim: {victim_address}) on {blockchain}...")
@@ -84,7 +87,7 @@ async def run_trace(
             if final_tx_hash and final_tx_hash not in known_hashes:
                 known_hashes.append(final_tx_hash)
 
-            config = TracerConfig(
+            config_kwargs = dict(
                 description=final_description,
                 victim_address=final_victim_address,
                 blockchain_name=final_blockchain,
@@ -92,8 +95,15 @@ async def run_trace(
                 approx_date=final_date,
                 known_tx_hashes=known_hashes,
                 tx_hash=final_tx_hash,
-                theft_asset=final_theft_asset
+                theft_asset=final_theft_asset,
             )
+            if stolen_amount is not None:
+                config_kwargs["stolen_amount"] = stolen_amount
+            if cex_single_cluster_threshold is not None:
+                config_kwargs["cex_single_cluster_threshold"] = cex_single_cluster_threshold
+            if traced_amount_tolerance is not None:
+                config_kwargs["traced_amount_tolerance"] = traced_amount_tolerance
+            config = TracerConfig(**config_kwargs)
 
             print("Running tracer...")
             result = await tracer.trace(config)

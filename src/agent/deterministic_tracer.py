@@ -219,7 +219,7 @@ def _detect_role(
     if _matches_keywords(combined, mixer_keywords):
         return "unidentified_service", True, "Mixer", None
     if _matches_keywords(combined, otc_keywords):
-        return "otc_service", True, "OTC", None
+        return "otc_service", False, "OTC", None
     if _matches_keywords(combined, cex_keywords):
         return "cex_deposit", True, owner_name or (service_platforms[0] if service_platforms else "CEX"), None
     if _matches_keywords(combined, bridge_keywords):
@@ -622,11 +622,9 @@ class RuleBasedTracer:
                 ))
                 continue
 
-            # Terminal handling
-            if is_terminal and entity.role in {"cex_deposit", "otc_service", "unidentified_service"}:
-                stop = "Reached CEX deposit" if entity.role == "cex_deposit" else (
-                    "Reached OTC service" if entity.role == "otc_service" else "Reached mixer/service"
-                )
+            # Terminal handling — OTC-like entities are non-terminal; continue tracing
+            if is_terminal and entity.role in {"cex_deposit", "unidentified_service"}:
+                stop = "Reached CEX deposit" if entity.role == "cex_deposit" else "Reached mixer/service"
                 paths.append(Path(
                     path_id=state["path_id"],
                     description="Deterministic trace path",
@@ -634,6 +632,18 @@ class RuleBasedTracer:
                     stop_reason=stop,
                 ))
                 continue
+
+            if entity.role == "otc_service":
+                if "Potential Service / OTC-like Entity" not in entity.labels:
+                    entity.labels.append("Potential Service / OTC-like Entity")
+                annotations.append(Annotation(
+                    id=f"ann-{annotation_counter}",
+                    label="Ownership Change Risk",
+                    related_addresses=[current_address],
+                    related_steps=[f"{state['path_id']}:{len(steps)-1}"],
+                    text="Ownership change risk: funds may have changed hands at this service-like entity."
+                ))
+                annotation_counter += 1
 
             # Fetch outgoing txs
             txs = await self._get_outgoing_txs(current_address, chain, token_id, incoming_time)

@@ -58,6 +58,10 @@ def build_summary_text(trace_result: TraceResult) -> str:
 
     summary += f"\nTrace Stats:\n- Explored Paths: {stats.explored_paths}\n"
     summary += f"- Initial Amount: {stats.initial_amount_estimate}\n"
+    if stats.stolen_amount:
+        summary += f"- Stolen Amount: {stats.stolen_amount:,.2f}\n"
+    if stats.total_traced_amount is not None:
+        summary += f"- Total Traced (FIFO-attributed): {stats.total_traced_amount:,.2f}\n"
     if trace_result.visualization_url:
         summary += f"- Visualization: {trace_result.visualization_url}\n"
 
@@ -93,6 +97,18 @@ def build_summary_text(trace_result: TraceResult) -> str:
             summary += f"- {e.address} ({e.role}): {', '.join(e.labels)}\n"
             summary += f"  Reason: {reason}{risk_info}\n"
 
+    # Risk warnings (ownership change, cap, OTC-like, etc.)
+    risk_warnings = [
+        a for a in trace_result.annotations
+        if a.label in ("Ownership Change Risk", "Potential Service / OTC-like Entity", "Cap Reached", "CEX Concentration")
+    ]
+    if risk_warnings:
+        summary += "\nRisk Warnings:\n"
+        for w in risk_warnings:
+            summary += f"- [{w.label}] {w.text}\n"
+            if w.related_addresses:
+                summary += f"  Addresses: {', '.join(w.related_addresses)}\n"
+
     return summary
 
 def build_graph(trace_result: TraceResult) -> dict:
@@ -126,6 +142,7 @@ def build_graph(trace_result: TraceResult) -> dict:
                 "chain": step.chain,
                 "asset": step.asset,
                 "amount_estimate": step.amount_estimate,
+                "attributed_amount": step.attributed_amount,
                 "step_type": step.step_type
             }
             # Add reasoning if available

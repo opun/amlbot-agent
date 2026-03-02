@@ -83,6 +83,9 @@ class TraceRequest(BaseModel):
     tx_hash: Optional[str] = None
     theft_asset: Optional[str] = None
     user_id: Optional[str] = None  # Can be passed from NextAuth session
+    stolen_amount: Optional[float] = None
+    cex_single_cluster_threshold: Optional[float] = None
+    traced_amount_tolerance: Optional[float] = None
 
 
 # In-memory session storage (use Redis in production)
@@ -1067,7 +1070,7 @@ async def start_trace(request: TraceRequest, http_request: Request):
             detail="Either victim_address or tx_hash must be provided"
         )
 
-    config = TracerConfig(
+    config_kwargs: Dict[str, Any] = dict(
         description=request.description,
         victim_address=request.victim_address,
         blockchain_name=request.blockchain,
@@ -1077,6 +1080,13 @@ async def start_trace(request: TraceRequest, http_request: Request):
         tx_hash=request.tx_hash,
         theft_asset=request.theft_asset,
     )
+    if request.stolen_amount is not None:
+        config_kwargs["stolen_amount"] = request.stolen_amount
+    if request.cex_single_cluster_threshold is not None:
+        config_kwargs["cex_single_cluster_threshold"] = request.cex_single_cluster_threshold
+    if request.traced_amount_tolerance is not None:
+        config_kwargs["traced_amount_tolerance"] = request.traced_amount_tolerance
+    config = TracerConfig(**config_kwargs)
 
     return StreamingResponse(
         run_trace_streaming(config, user_id=user_id),

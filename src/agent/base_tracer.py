@@ -60,6 +60,81 @@ class HopJob:
     asset: str
     token_id: int
     hop_index: int
+    attributed_amount: float = 0.0  # FIFO-attributed theft-origin share
+
+
+class FIFOLedger:
+    """
+    Tracks per-address inflow queues and attributes outflows using FIFO.
+
+    Design: attributed theft-share flows through the entire path without
+    consuming the global cap. The cap is only consumed when funds reach a
+    *terminal* endpoint (CEX, dead-end, mixer, etc.). This prevents the
+    cap from being exhausted on intermediate hops.
+    """
+
+    def __init__(self, stolen_amount: float, tolerance: float = 0.03):
+        self.stolen_amount = stolen_amount
+        self.tolerance = tolerance
+        self.cap = stolen_amount * (1.0 + tolerance) if stolen_amount > 0 else float("inf")
+        self.total_traced: float = 0.0
+        self._queues: Dict[str, List[Dict[str, float]]] = {}
+
+    def record_inflow(self, address: str, amount: float, theft_share: float):
+        """Record an inflow to an address. theft_share is the attributed theft portion."""
+        self._queues.setdefault(address, []).append({
+            "amount": amount,
+            "theft_share": min(theft_share, amount),
+        })
+
+    def attribute_outflow(self, address: str, outflow_amount: float) -> float:
+        """
+        Attribute an outflow from an address using FIFO.
+        Returns the theft-attributed portion of this outflow.
+        Does NOT consume the global cap — use claim_terminal for that.
+        """
+        queue = self._queues.get(address, [])
+        if not queue:
+            return 0.0
+
+        remaining = outflow_amount
+        attributed = 0.0
+
+        while remaining > 0 and queue:
+            entry = queue[0]
+            take = min(remaining, entry["amount"])
+            if entry["amount"] > 0:
+                ratio = entry["theft_share"] / entry["amount"]
+            else:
+                ratio = 0.0
+            theft_take = take * ratio
+
+            attributed += theft_take
+            entry["amount"] -= take
+            entry["theft_share"] -= theft_take
+            remaining -= take
+
+            if entry["amount"] <= 0.001:
+                queue.pop(0)
+
+        return attributed
+
+    def claim_terminal(self, attributed: float) -> float:
+        """
+        Claim attributed amount at a terminal endpoint against the global cap.
+        Call this ONLY when funds reach a final destination (CEX, dead-end, etc.).
+        Returns clamped amount (may be less if cap would be exceeded).
+        """
+        if self.stolen_amount <= 0:
+            return attributed
+        headroom = max(0.0, self.cap - self.total_traced)
+        clamped = min(attributed, headroom)
+        self.total_traced += clamped
+        return clamped
+
+    @property
+    def cap_exceeded(self) -> bool:
+        return self.stolen_amount > 0 and self.total_traced >= self.cap
 
 
 # ─── Tool Definitions (OpenAI function calling format) ────────────────────────
@@ -487,13 +562,57 @@ class BaseTracer(ABC):
         if _has_any(combined, cex_keywords):
             return {"role": "cex_deposit", "terminal": True, "service_label": "Exchange", "protocol": None}
         if _has_any(combined, otc_keywords):
-            return {"role": "otc_service", "terminal": True, "service_label": "OTC", "protocol": None}
+            return {"role": "otc_service", "terminal": False, "service_label": "OTC", "protocol": None}
         if _has_any(combined, bridge_keywords):
             return {"role": "bridge_service", "terminal": True, "service_label": "Bridge", "protocol": None}
         if _has_any(combined, dex_keywords):
             return {"role": "bridge_service", "terminal": True, "service_label": "DEX", "protocol": None}
 
         return {"role": "intermediate", "terminal": False, "service_label": None, "protocol": None}
+
+    @staticmethod
+    def _classify_otc_like(
+        total_in_volume: float,
+        tx_count: int,
+        counterparty_count: int,
+        address_age_days: int,
+        outbound_distribution: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """
+        Behavioral classification: detect OTC-like / Potential Service entities
+        based on activity metrics. Returns classification dict (never terminal).
+
+        Criteria (all must hold):
+          - total_in_volume >= $50k
+          - tx_count >= 100
+          - address_age_days >= 180 (6 months)
+        """
+        is_otc_like = (
+            total_in_volume >= 50_000
+            and tx_count >= 100
+            and address_age_days >= 180
+        )
+        if not is_otc_like:
+            return {"otc_like": False}
+
+        dominant_cex = None
+        dominant_share = 0.0
+        total_out = sum(outbound_distribution.values()) or 1.0
+        for dest, amount in outbound_distribution.items():
+            share = amount / total_out
+            if share > dominant_share:
+                dominant_share = share
+                dominant_cex = dest
+
+        return {
+            "otc_like": True,
+            "total_in_volume": total_in_volume,
+            "tx_count": tx_count,
+            "counterparty_count": counterparty_count,
+            "address_age_days": address_age_days,
+            "dominant_cex": dominant_cex,
+            "dominant_cex_share": dominant_share,
+        }
 
     def _coerce_tool_call(self, tool_call: Any) -> Any:
         if isinstance(tool_call, dict):
@@ -1146,6 +1265,10 @@ class BaseTracer(ABC):
         tx_list_collected: List[Dict[str, Any]] = []
         txs_seen: set = set()
 
+        stolen_amount = float(inputs.get("stolen_amount") or payload.get("stolen_amount") or 0.0)
+        traced_tolerance = float(inputs.get("traced_amount_tolerance") or payload.get("traced_amount_tolerance") or 0.03)
+        fifo_ledger = FIFOLedger(stolen_amount, traced_tolerance)
+
         async def _call_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
             if "blockchain_name" in arguments:
                 arguments["blockchain_name"] = self._normalize_chain(arguments.get("blockchain_name"))
@@ -1412,6 +1535,12 @@ class BaseTracer(ABC):
                 "stop_reason": None,
             }
             _ensure_entity(from_addr, "victim", 0.0, notes="Victim")
+            theft_amount = float(amount or 0.0)
+            if stolen_amount <= 0:
+                stolen_amount = theft_amount
+                fifo_ledger.stolen_amount = stolen_amount
+                fifo_ledger.cap = stolen_amount * (1.0 + traced_tolerance) if stolen_amount > 0 else float("inf")
+            fifo_ledger.record_inflow(to_addr, theft_amount, theft_amount)
             _add_step("1", {
                 "step_index": 0,
                 "from": from_addr,
@@ -1419,7 +1548,8 @@ class BaseTracer(ABC):
                 "tx_hash": tx_hash,
                 "chain": chain,
                 "asset": asset,
-                "amount_estimate": float(amount or 0.0),
+                "amount_estimate": theft_amount,
+                "attributed_amount": theft_amount,
                 "time": block_time,
                 "direction": "out",
                 "step_type": "direct_transfer",
@@ -1442,12 +1572,13 @@ class BaseTracer(ABC):
                 path_id="1",
                 current_address=to_addr,
                 incoming_tx_hash=tx_hash,
-                incoming_amount=float(amount or 0.0),
+                incoming_amount=theft_amount,
                 incoming_time=block_time,
                 chain=chain,
                 asset=asset,
                 token_id=int(token_id or 0),
                 hop_index=1,
+                attributed_amount=theft_amount,
             ))
         elif victim_address:
             paths["1"] = {
@@ -1523,6 +1654,12 @@ class BaseTracer(ABC):
                 path_id = "1" if idx == 0 else str(path_counter + idx)
                 if path_id not in paths:
                     _copy_path(path_id, "1")
+                step_amount = float(amount or 0.0)
+                if stolen_amount <= 0 and idx == 0:
+                    stolen_amount = step_amount
+                    fifo_ledger.stolen_amount = stolen_amount
+                    fifo_ledger.cap = stolen_amount * (1.0 + traced_tolerance) if stolen_amount > 0 else float("inf")
+                fifo_ledger.record_inflow(to_addr, step_amount, step_amount)
                 _add_step(path_id, {
                     "step_index": 0,
                     "from": victim_address,
@@ -1530,7 +1667,8 @@ class BaseTracer(ABC):
                     "tx_hash": sel_hash,
                     "chain": chain,
                     "asset": asset,
-                    "amount_estimate": float(amount or 0.0),
+                    "amount_estimate": step_amount,
+                    "attributed_amount": step_amount,
                     "time": block_time,
                     "direction": "out",
                     "step_type": "direct_transfer",
@@ -1553,12 +1691,13 @@ class BaseTracer(ABC):
                     path_id=path_id,
                     current_address=to_addr,
                     incoming_tx_hash=sel_hash,
-                    incoming_amount=float(amount or 0.0),
+                    incoming_amount=step_amount,
                     incoming_time=block_time,
                     chain=chain,
                     asset=asset,
                     token_id=int(token_id or 0),
                     hop_index=1,
+                    attributed_amount=step_amount,
                 ))
 
         else:
@@ -1567,13 +1706,33 @@ class BaseTracer(ABC):
         processed_paths = 0
         while hop_queue and processed_paths < max_paths:
             job = hop_queue.pop(0)
+
+            if fifo_ledger.cap_exceeded:
+                if paths[job.path_id]["stop_reason"] is None:
+                    paths[job.path_id]["stop_reason"] = "Global traced amount cap reached"
+                    annotations.append({
+                        "id": f"ann-{len(annotations)+1}",
+                        "label": "Cap Reached",
+                        "related_addresses": [job.current_address],
+                        "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                        "text": (
+                            f"Total traced amount ({fifo_ledger.total_traced:,.2f}) reached the cap "
+                            f"({fifo_ledger.cap:,.2f} = stolen {fifo_ledger.stolen_amount:,.2f} + "
+                            f"{fifo_ledger.tolerance*100:.1f}% tolerance). Stopping further attribution."
+                        ),
+                    })
+                processed_paths += 1
+                continue
+
             if job.hop_index > max_hops:
+                fifo_ledger.claim_terminal(job.attributed_amount)
                 if paths[job.path_id]["stop_reason"] is None:
                     paths[job.path_id]["stop_reason"] = "Max hop limit reached"
                 processed_paths += 1
                 continue
 
             if job.current_address in path_seen_addresses.get(job.path_id, set()):
+                fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
                 processed_paths += 1
                 continue
@@ -1666,6 +1825,101 @@ class BaseTracer(ABC):
                     "text": f"Passed through high-risk address (score: {risk_score:.2f})",
                 })
 
+            # --- OTC-like behavioral analysis ---
+            cex_threshold = payload.get("cex_single_cluster_threshold", 0.60)
+            if role in ("otc_service", "intermediate", "unidentified_service") and not terminal:
+                try:
+                    deposit_txs = await _fetch_outgoing_txs(
+                        job.current_address, job.chain, None, job.token_id, max_pages=2, page_limit=50,
+                    )
+                    withdraw_txs = deposit_txs  # already fetched (withdrawals)
+                    in_txs_result = await _call_tool("all_txs", {
+                        "address": job.current_address,
+                        "blockchain_name": job.chain,
+                        "filter": {"token_id": [job.token_id]} if job.token_id else None,
+                        "limit": 50, "offset": 0,
+                        "direction": "asc", "order": "time",
+                        "transaction_type": "deposit",
+                    })
+                    in_data = in_txs_result.get("data", []) if isinstance(in_txs_result, dict) else []
+
+                    total_in_volume = 0.0
+                    counterparties: set = set()
+                    earliest_time = None
+                    for itx in in_data:
+                        amt = self._normalize_amount(itx.get("amount_coerced") or itx.get("amount") or 0, job.chain, job.asset)
+                        total_in_volume += amt
+                        sender = itx.get("from") or itx.get("address")
+                        if sender:
+                            counterparties.add(sender)
+                        bt = itx.get("block_time")
+                        if bt and (earliest_time is None or int(bt) < earliest_time):
+                            earliest_time = int(bt)
+
+                    now_ts = int(time.time())
+                    address_age_days = (now_ts - earliest_time) // 86400 if earliest_time else 0
+                    tx_count = len(in_data) + len(withdraw_txs)
+
+                    outbound_distribution: Dict[str, float] = {}
+                    for wtx in withdraw_txs[:50]:
+                        w_hash = wtx.get("hash") or wtx.get("tx_hash")
+                        w_amt = self._normalize_amount(wtx.get("amount_coerced") or wtx.get("amount") or 0, job.chain, job.asset)
+                        if w_hash and w_hash in owner_hints:
+                            dest_label = str(owner_hints[w_hash])
+                        else:
+                            dest_label = wtx.get("to") or "unknown"
+                        outbound_distribution[dest_label] = outbound_distribution.get(dest_label, 0.0) + w_amt
+
+                    otc_result = self._classify_otc_like(
+                        total_in_volume=total_in_volume,
+                        tx_count=tx_count,
+                        counterparty_count=len(counterparties),
+                        address_age_days=address_age_days,
+                        outbound_distribution=outbound_distribution,
+                    )
+
+                    if otc_result.get("otc_like"):
+                        role = "otc_service"
+                        terminal = False
+                        if "Potential Service / OTC-like Entity" not in labels:
+                            labels.append("Potential Service / OTC-like Entity")
+                        _ensure_entity(job.current_address, role, risk_score, labels=labels,
+                                       notes=f"OTC-like profile: vol=${total_in_volume:,.0f}, {tx_count} txs, {address_age_days}d old")
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": "Potential Service / OTC-like Entity",
+                            "related_addresses": [job.current_address],
+                            "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                            "text": (
+                                f"Address resembles an unidentified service (OTC-like). "
+                                f"Volume: ${total_in_volume:,.0f}, Txs: {tx_count}, "
+                                f"Counterparties: {len(counterparties)}, Age: {address_age_days}d."
+                            ),
+                        })
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": "Ownership Change Risk",
+                            "related_addresses": [job.current_address],
+                            "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                            "text": "Ownership change risk: funds may have changed hands at this service-like entity.",
+                        })
+
+                        dom_share = otc_result.get("dominant_cex_share", 0.0)
+                        dom_cex = otc_result.get("dominant_cex")
+                        if dom_share >= cex_threshold and dom_cex:
+                            annotations.append({
+                                "id": f"ann-{len(annotations)+1}",
+                                "label": "CEX Concentration",
+                                "related_addresses": [job.current_address],
+                                "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                                "text": (
+                                    f"CEX concentration: {dom_share*100:.1f}% of outflows go to {dom_cex}. "
+                                    f"Tracing through to CEX endpoint."
+                                ),
+                            })
+                except Exception as exc:
+                    logger.warning(f"OTC-like analysis failed for {job.current_address}: {exc}")
+
             # Bridge detection & continuation (probe early if needed)
             bridge_info = None
             if job.incoming_tx_hash:
@@ -1715,6 +1969,10 @@ class BaseTracer(ABC):
                                 "text": f"Bridge aggregation detected - output amount ({bridge_amount}) differs from input ({job.incoming_amount}).",
                             })
 
+                    bridge_step_amount = float(bridge_amount or 0.0)
+                    bridge_raw_attr = fifo_ledger.attribute_outflow(job.current_address, bridge_step_amount)
+                    fifo_ledger.record_inflow(dst_address, bridge_step_amount, bridge_raw_attr)
+
                     step_index = len(paths[job.path_id]["steps"])
                     _add_step(job.path_id, {
                         "step_index": step_index,
@@ -1723,7 +1981,8 @@ class BaseTracer(ABC):
                         "tx_hash": dst_tx_hash,
                         "chain": dst_chain_norm,
                         "asset": job.asset,
-                        "amount_estimate": float(bridge_amount or 0.0),
+                        "amount_estimate": bridge_step_amount,
+                        "attributed_amount": bridge_raw_attr,
                         "time": int(dst_block_time) if dst_block_time else job.incoming_time,
                         "direction": "out",
                         "step_type": "bridge_transfer",
@@ -1743,23 +2002,26 @@ class BaseTracer(ABC):
                         path_id=job.path_id,
                         current_address=dst_address,
                         incoming_tx_hash=dst_tx_hash or job.incoming_tx_hash,
-                        incoming_amount=float(bridge_amount or 0.0),
+                        incoming_amount=bridge_step_amount,
                         incoming_time=int(dst_block_time) if dst_block_time else job.incoming_time,
                         chain=dst_chain_norm,
                         asset=job.asset,
                         token_id=int(new_token_id or job.token_id or 0),
                         hop_index=job.hop_index + 1,
+                        attributed_amount=bridge_raw_attr,
                     ))
                     # Continue on destination chain
                     continue
 
                 # If tool hints at bridge but no destination, only stop if metadata already says bridge.
                 if role == "bridge_service" or heuristic.get("role") == "bridge_service":
+                    fifo_ledger.claim_terminal(job.attributed_amount)
                     paths[job.path_id]["stop_reason"] = "Reached bridge service - destination unknown"
                     processed_paths += 1
                     continue
 
             if terminal:
+                fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = stop_reason or "Reached terminal entity"
                 processed_paths += 1
                 continue
@@ -1772,6 +2034,7 @@ class BaseTracer(ABC):
                 job.token_id,
             )
             if not data_list:
+                fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
                 processed_paths += 1
                 continue
@@ -1827,6 +2090,10 @@ class BaseTracer(ABC):
                 if transfer.get("output_riskscore") is not None:
                     risk_map[to_addr] = float(transfer.get("output_riskscore") or 0.0)
 
+                step_amount = float(amount or 0.0)
+                raw_attributed = fifo_ledger.attribute_outflow(job.current_address, step_amount)
+                fifo_ledger.record_inflow(to_addr, step_amount, raw_attributed)
+
                 if idx == 0:
                     path_id = base_path_id
                 else:
@@ -1842,7 +2109,8 @@ class BaseTracer(ABC):
                     "tx_hash": sel_hash,
                     "chain": job.chain,
                     "asset": job.asset,
-                    "amount_estimate": float(amount or 0.0),
+                    "amount_estimate": step_amount,
+                    "attributed_amount": raw_attributed,
                     "time": block_time,
                     "direction": "out",
                     "step_type": "direct_transfer",
@@ -1865,16 +2133,18 @@ class BaseTracer(ABC):
                     path_id=path_id,
                     current_address=to_addr,
                     incoming_tx_hash=sel_hash,
-                    incoming_amount=float(amount or 0.0),
+                    incoming_amount=step_amount,
                     incoming_time=block_time,
                     chain=job.chain,
                     asset=job.asset,
                     token_id=int(token_id or 0),
                     hop_index=job.hop_index + 1,
+                    attributed_amount=raw_attributed,
                 ))
                 took_step = True
 
             if not took_step:
+                fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
                 processed_paths += 1
 
@@ -1926,6 +2196,8 @@ class BaseTracer(ABC):
                 "initial_amount_estimate": initial_amount,
                 "explored_paths": len(paths),
                 "terminated_reason": "All paths reached terminal entities or dead ends",
+                "total_traced_amount": fifo_ledger.total_traced if fifo_ledger.stolen_amount > 0 else None,
+                "stolen_amount": fifo_ledger.stolen_amount if fifo_ledger.stolen_amount > 0 else None,
             },
         }
 
@@ -2109,7 +2381,12 @@ class BaseTracer(ABC):
                 "asset_symbol": (config.theft_asset or config.asset_symbol or "").upper(),
                 "approx_date": config.approx_date,
                 "description": config.description,
+                "stolen_amount": config.stolen_amount,
+                "traced_amount_tolerance": config.traced_amount_tolerance,
             },
+            "cex_single_cluster_threshold": config.cex_single_cluster_threshold,
+            "stolen_amount": config.stolen_amount or 0.0,
+            "traced_amount_tolerance": config.traced_amount_tolerance,
             "rules_version": "orchestrator-unified-1",
         }
 
@@ -2240,9 +2517,9 @@ class BaseTracer(ABC):
                     pass
             if not share_url:
                 if base_url:
-                    share_url = f"{base_url}/visualization/{hash_value}"
+                    share_url = f"{base_url}/ai/{hash_value}"
                 else:
-                    share_url = f"/visualization/{hash_value}"
+                    share_url = f"/ai/{hash_value}"
 
         if share_url:
             trace_result.visualization_url = share_url

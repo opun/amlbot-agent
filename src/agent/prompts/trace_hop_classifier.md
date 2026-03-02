@@ -18,7 +18,7 @@ Use `get_address.data.owner` and `get_extra_address_info.data.services.use_platf
 - Bridge keywords: bridge, layerzero, stargate, wormhole, allbridge, synapse, hop, multichain → `role=bridge_service`, `terminal=true`
 - Exchange keywords: binance, coinbase, kraken, okx, huobi, kucoin, bybit, gate → `role=cex_deposit`, `terminal=true`
 - Mixer keywords: mixer, tornado, blender → `role=unidentified_service`, `terminal=true`
-- OTC keywords: otc → `role=otc_service`, `terminal=true`
+- OTC keywords: otc → `role=otc_service`, `terminal=false` (OTC-like entities are NOT terminal; tracing continues through them)
 - Otherwise: `role=intermediate`, `terminal=false`
 
 If risk score > 0.75, add label "High Risk" but do not mark terminal unless above rules match.

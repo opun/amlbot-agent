@@ -196,6 +196,18 @@ components:
           type: string
           nullable: true
           description: User id from the frontend session (alternative to X-User-Id header).
+        stolen_amount:
+          type: number
+          nullable: true
+          description: Known theft amount (used for global cap enforcement).
+        cex_single_cluster_threshold:
+          type: number
+          default: 0.60
+          description: Min share of outflows to one CEX cluster to allow tracing through OTC-like entity (0-1).
+        traced_amount_tolerance:
+          type: number
+          default: 0.03
+          description: Allowed tolerance above stolen_amount for total traced amount (0-1).
     CaseMeta:
       type: object
       properties:

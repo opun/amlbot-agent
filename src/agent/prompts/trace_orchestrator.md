@@ -317,6 +317,9 @@ WHILE (not terminal):
      - IF CEX detected → STOP, mark as "cex_deposit"
      - IF Bridge detected → STOP on this chain, use bridge-analyzer, continue on destination chain
      - IF Mixer detected → STOP, mark as "unidentified_service"
+     - IF OTC/service-like detected → DO NOT STOP. Mark as "otc_service", add "Potential Service / OTC-like Entity" label,
+       add "Ownership Change Risk" annotation, and CONTINUE tracing. If a high share (≥60% default) of outflows goes
+       to a single known CEX cluster, follow through to that CEX.
      - ELSE → CONTINUE to step 4
 
   4. Find next outgoing transactions:

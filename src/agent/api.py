@@ -501,8 +501,7 @@ async def _run_trace_http(
                 "trace_id": trace_id,
                 "trace_url": trace_url,
             }
-            if result.visualization_url:
-                response_data["visualization_url"] = result.visualization_url
+            response_data["visualization_url"] = result.visualization_url
             # Attach raw arrays for visualization pipeline (txs + txList)
             if hasattr(tracer, "last_txs"):
                 response_data["txs_array"] = tracer.last_txs
@@ -621,8 +620,7 @@ async def _run_trace_stdio(
                     "trace_id": trace_id,
                     "trace_url": trace_url,
                 }
-                if result.visualization_url:
-                    response_data["visualization_url"] = result.visualization_url
+                response_data["visualization_url"] = result.visualization_url
                 # Attach raw arrays for visualization pipeline (txs + txList)
                 if hasattr(tracer, "last_txs"):
                     response_data["txs_array"] = tracer.last_txs

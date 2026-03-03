@@ -2456,8 +2456,14 @@ class BaseTracer(ABC):
                         pass
                     raise
         except Exception as exc:
-            logger.warning(f"⚠️ Visualization save/share failed: {exc}")
+            logger.warning(
+                "⚠️ Visualization save/share failed: %s: %s; title=%s, type=%s",
+                type(exc).__name__, exc,
+                save_input.get("title"), save_input.get("type"),
+            )
             return
+
+        logger.info("Visualization save/share returned result type=%s", type(result).__name__)
 
         def _deep_find(obj: Any, keys: set) -> Optional[str]:
             if isinstance(obj, dict):
@@ -2495,11 +2501,15 @@ class BaseTracer(ABC):
             if not hash_value:
                 hash_value = (
                     result.get("hash") or
+                    result.get("id") or
+                    result.get("_id") or
                     result.get("data", {}).get("hash") or
+                    result.get("data", {}).get("id") or
+                    result.get("data", {}).get("_id") or
                     result.get("data", {}).get("payload", {}).get("hash")
                 )
             if not hash_value:
-                hash_value = _deep_find(result, {"hash"})
+                hash_value = _deep_find(result, {"hash", "id", "_id"})
 
         if not share_url and hash_value:
             base_url = (
@@ -2530,7 +2540,10 @@ class BaseTracer(ABC):
                 preview = json.dumps(result, ensure_ascii=False)[:800]
             except Exception:
                 preview = str(result)[:800]
-            logger.info(f"✅ Visualization saved/shared (no URL returned). result_preview={preview}")
+            logger.warning(
+                "⚠️ Visualization saved but no URL extracted (share_url=%s, hash=%s). result_preview=%s",
+                share_url, hash_value, preview,
+            )
 
     @abstractmethod
     def _get_client(self):

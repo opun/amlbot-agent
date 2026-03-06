@@ -228,6 +228,10 @@ components:
             type: string
         asset_symbol:
           type: string
+        token_id:
+          type: integer
+          nullable: true
+          description: Numeric token identifier for the traced asset.
         approx_date:
           type: string
           nullable: true

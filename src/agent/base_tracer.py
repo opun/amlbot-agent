@@ -2367,6 +2367,7 @@ class BaseTracer(ABC):
             blockchain_name=config.blockchain_name,
             chains=[config.blockchain_name],
             asset_symbol=asset_symbol,
+            token_id=token_id_hint,
             approx_date=config.approx_date,
         )
 

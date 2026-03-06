@@ -346,7 +346,7 @@ WHILE (not terminal):
 
 ### 7) Output Format
 Return a JSON object matching the TraceResult structure:
-- case_meta: {{case_id, trace_id, description, victim_address, blockchain_name, chains, asset_symbol, approx_date}}
+- case_meta: {{case_id, trace_id, description, victim_address, blockchain_name, chains, asset_symbol, token_id, approx_date}}
 - paths: list of paths (path_id, description, steps, stop_reason).
   - steps: list of ordered steps with **reasoning** field explaining why this transaction was selected.
   - stop_reason: explains why tracing stopped on this path (e.g., "Reached CEX deposit", "No more outgoing transactions", "Accumulated amount covered").
@@ -369,6 +369,7 @@ JSON Schema for reference:
     "blockchain_name": "string",
     "chains": ["string"],
     "asset_symbol": "string",
+    "token_id": 0,
     "approx_date": "string"
   }},
   "paths": [

@@ -23,6 +23,7 @@ class CaseMeta(BaseModel):
     blockchain_name: str
     chains: List[str]
     asset_symbol: str
+    token_id: Optional[int] = None
     approx_date: Optional[str] = None
 
 class Step(BaseModel):

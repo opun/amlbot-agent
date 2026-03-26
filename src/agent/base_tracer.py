@@ -1514,6 +1514,108 @@ class BaseTracer(ABC):
                 "output_riskscore": out_riskscore,
             }
 
+        def _parse_get_tx_transfers_utxo(
+            tx_data: dict[str, Any],
+            exclude_address: str | None = None,
+            min_fraction: float = 0.01,
+        ) -> list[dict[str, Any]]:
+            """Parse a UTXO get_transaction response into a list of transfers.
+
+            Returns one transfer dict per significant output (filtering dust
+            and change outputs).  Falls back to a single-element list for
+            account-model responses.
+            """
+            if not isinstance(tx_data, dict) or not tx_data:
+                return []
+
+            inp = tx_data.get("input") or tx_data.get("inputs")
+            out = tx_data.get("output") or tx_data.get("outputs")
+
+            # --- resolve sender ---
+            from_addr = None
+            inp_riskscore = None
+            inp_owner = None
+            if isinstance(inp, dict):
+                from_addr = inp.get("address")
+                inp_riskscore = inp.get("riskscore")
+                inp_owner = inp.get("owner")
+            elif isinstance(inp, list) and inp:
+                first_inp = inp[0] if isinstance(inp[0], dict) else {}
+                from_addr = first_inp.get("address")
+                inp_riskscore = first_inp.get("riskscore")
+                inp_owner = first_inp.get("owner")
+
+            if not from_addr:
+                from_addr = tx_data.get("from") or tx_data.get("sender")
+            if not from_addr:
+                return []
+
+            block_time = tx_data.get("block_time")
+            token_id = tx_data.get("token_id", 0)
+            fiat_rate = tx_data.get("fiat_rate") or tx_data.get("fiatRate")
+
+            # --- resolve outputs ---
+            if isinstance(out, dict):
+                # Account-model: single output
+                return [{
+                    "from": from_addr,
+                    "to": out.get("address"),
+                    "amount": out.get("amount") or tx_data.get("amount") or 0.0,
+                    "block_time": block_time,
+                    "token_id": token_id,
+                    "output_owner": out.get("owner"),
+                    "input_riskscore": inp_riskscore,
+                    "output_riskscore": out.get("riskscore"),
+                    "fiat_rate": fiat_rate,
+                }]
+
+            if not isinstance(out, list) or not out:
+                return []
+
+            # UTXO: compute total to determine dust threshold
+            candidates = [o for o in out if isinstance(o, dict) and o.get("address")]
+            if not candidates:
+                return []
+
+            total_out = sum(float(o.get("amount", 0)) for o in candidates)
+            threshold = total_out * min_fraction if total_out > 0 else 0
+
+            results: list[dict[str, Any]] = []
+            for o in candidates:
+                addr = o.get("address")
+                amt = float(o.get("amount", 0))
+                # Skip change outputs (same address as sender)
+                if addr == exclude_address:
+                    continue
+                # Skip dust
+                if amt < threshold:
+                    continue
+                results.append({
+                    "from": from_addr,
+                    "to": addr,
+                    "amount": amt,
+                    "block_time": block_time,
+                    "token_id": token_id,
+                    "output_owner": o.get("owner"),
+                    "input_riskscore": inp_riskscore,
+                    "output_riskscore": o.get("riskscore"),
+                    "fiat_rate": fiat_rate,
+                })
+
+            # Sort by amount descending so largest outputs come first
+            results.sort(key=lambda t: float(t.get("amount", 0)), reverse=True)
+
+            # Keep the full input/output arrays for visualization
+            if results:
+                results[0]["_raw_inputs"] = inp if isinstance(inp, list) else ([inp] if inp else [])
+                results[0]["_raw_outputs"] = out
+                results[0]["_fiat_rate"] = fiat_rate
+                results[0]["_total_in"] = tx_data.get("total_in") or total_out
+                results[0]["_total_out"] = tx_data.get("total_out") or total_out
+                results[0]["_fee"] = tx_data.get("fee") or tx_data.get("weight")
+
+            return results
+
         async def _resolve_transfer(
             tx_hash_val: str,
             chain_name: str,
@@ -1545,6 +1647,50 @@ class BaseTracer(ABC):
             if isinstance(tx_data, list) and tx_data:
                 tx_data = tx_data[0]
             return _parse_get_tx_transfer(tx_data, exclude_address=address_hint)
+
+        async def _resolve_utxo_outputs(
+            tx_hash_val: str,
+            chain_name: str,
+            address_hint: str | None = None,
+            token_id_val: int | None = None,
+        ) -> list[dict[str, Any]]:
+            """Resolve all significant outputs of a UTXO transaction.
+
+            Calls get_transaction and returns a list of transfers, one per
+            significant output.  Falls back to _resolve_transfer() wrapped
+            in a single-element list if the UTXO parser returns nothing.
+            """
+            if not address_hint:
+                single = await _resolve_transfer(
+                    tx_hash_val, chain_name,
+                    address_hint=address_hint,
+                    token_id_val=token_id_val,
+                )
+                return [single] if single else []
+
+            logger.info(f"Resolving UTXO outputs for {tx_hash_val[:16]}...")
+            tx_result = await _call_tool("get_transaction", {
+                "address": address_hint,
+                "tx_hash": tx_hash_val,
+                "blockchain_name": chain_name,
+                "token_id": 0,
+                "path": "0",
+            })
+            tx_data = tx_result.get("data", {}) if isinstance(tx_result, dict) else {}
+            if isinstance(tx_data, list) and tx_data:
+                tx_data = tx_data[0]
+
+            outputs = _parse_get_tx_transfers_utxo(tx_data, exclude_address=address_hint)
+            if outputs:
+                return outputs
+
+            # Fallback to single-transfer resolution
+            single = await _resolve_transfer(
+                tx_hash_val, chain_name,
+                address_hint=address_hint,
+                token_id_val=token_id_val,
+            )
+            return [single] if single else []
 
         async def _fetch_outgoing_txs(
             address: str,
@@ -1694,78 +1840,170 @@ class BaseTracer(ABC):
 
         # Seed path(s)
         if tx_hash:
-            transfer = await _resolve_transfer(
-                tx_hash, chain,
-                address_hint=victim_address,
-                token_id_val=token_id_hint,
-            )
-            if not transfer or not transfer.get("from") or not transfer.get("to"):
-                raise RuntimeError("Unable to extract theft transfer details from tx_hash")
+            is_utxo_chain = chain in self._SATOSHI_CHAINS
 
-            from_addr = transfer["from"]
-            to_addr = transfer["to"]
-            amount = self._resolve_amount(tx_hash, transfer.get("amount", 0.0), chain, all_txs_map, asset)
-            block_time = transfer.get("block_time")
-            token_id = transfer.get("token_id") or token_id_hint
-            if transfer.get("output_owner"):
-                owner_hints[to_addr] = transfer.get("output_owner")
-            if transfer.get("input_riskscore") is not None:
-                risk_map[from_addr] = float(transfer.get("input_riskscore") or 0.0)
-            if transfer.get("output_riskscore") is not None:
-                risk_map[to_addr] = float(transfer.get("output_riskscore") or 0.0)
+            if is_utxo_chain:
+                # ── UTXO multi-output: resolve ALL significant outputs ──
+                utxo_outputs = await _resolve_utxo_outputs(
+                    tx_hash, chain,
+                    address_hint=victim_address,
+                    token_id_val=token_id_hint,
+                )
+                if not utxo_outputs or not utxo_outputs[0].get("from"):
+                    raise RuntimeError("Unable to extract theft transfer details from tx_hash")
 
-            paths["1"] = {
-                "path_id": "1",
-                "description": "Primary theft flow",
-                "steps": [],
-                "stop_reason": None,
-            }
-            _ensure_entity(from_addr, "victim", 0.0, notes="Victim")
-            theft_amount = float(amount or 0.0)
-            if stolen_amount <= 0:
-                stolen_amount = theft_amount
-                fifo_ledger.stolen_amount = stolen_amount
-                fifo_ledger.cap = stolen_amount * (1.0 + traced_tolerance) if stolen_amount > 0 else float("inf")
-            fifo_ledger.record_inflow(to_addr, theft_amount, theft_amount)
-            _add_step("1", {
-                "step_index": 0,
-                "from": from_addr,
-                "to": to_addr,
-                "tx_hash": tx_hash,
-                "chain": chain,
-                "asset": asset,
-                "amount_estimate": theft_amount,
-                "attributed_amount": theft_amount,
-                "time": block_time,
-                "direction": "out",
-                "step_type": "direct_transfer",
-                "service_label": None,
-                "protocol": None,
-                "reasoning": "Primary theft transaction provided by user.",
-            })
+                from_addr = utxo_outputs[0]["from"]
+                block_time = utxo_outputs[0].get("block_time")
+                token_id = utxo_outputs[0].get("token_id") or token_id_hint
 
-            self._collect_token_transfer_data(
-                json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
-                {"tx_hash": tx_hash, "blockchain_name": chain},
-                all_txs_map,
-                risk_map,
-                txs_collected,
-                tx_list_collected,
-                txs_seen,
-            )
+                # Total theft amount across all outputs
+                total_raw = sum(float(o.get("amount", 0)) for o in utxo_outputs)
+                theft_amount = self._resolve_amount(tx_hash, total_raw, chain, all_txs_map, asset)
 
-            hop_queue.append(HopJob(
-                path_id="1",
-                current_address=to_addr,
-                incoming_tx_hash=tx_hash,
-                incoming_amount=theft_amount,
-                incoming_time=block_time,
-                chain=chain,
-                asset=asset,
-                token_id=int(token_id or 0),
-                hop_index=1,
-                attributed_amount=theft_amount,
-            ))
+                _ensure_entity(from_addr, "victim", 0.0, notes="Victim")
+                if utxo_outputs[0].get("input_riskscore") is not None:
+                    risk_map[from_addr] = float(utxo_outputs[0].get("input_riskscore") or 0.0)
+
+                if stolen_amount <= 0:
+                    stolen_amount = theft_amount
+                    fifo_ledger.stolen_amount = stolen_amount
+                    fifo_ledger.cap = stolen_amount * (1.0 + traced_tolerance) if stolen_amount > 0 else float("inf")
+
+                # Collect full UTXO tx data for visualization once
+                self._collect_utxo_tx_data(
+                    tx_hash, chain, utxo_outputs,
+                    risk_map, txs_collected, tx_list_collected, txs_seen,
+                )
+
+                seen_utxo_recipients: set[str] = set()
+                for idx, uout in enumerate(utxo_outputs):
+                    to_addr = uout.get("to")
+                    if not to_addr or to_addr in seen_utxo_recipients:
+                        continue
+                    seen_utxo_recipients.add(to_addr)
+
+                    out_amount = self._resolve_amount(tx_hash, uout.get("amount", 0.0), chain, all_txs_map, asset)
+                    if uout.get("output_owner"):
+                        owner_hints[to_addr] = uout.get("output_owner")
+                    if uout.get("output_riskscore") is not None:
+                        risk_map[to_addr] = float(uout.get("output_riskscore") or 0.0)
+
+                    path_id = "1" if idx == 0 else str(path_counter + idx)
+                    if path_id not in paths:
+                        paths[path_id] = {
+                            "path_id": path_id,
+                            "description": f"Theft output branch {idx + 1}",
+                            "steps": [],
+                            "stop_reason": None,
+                        }
+
+                    fifo_ledger.record_inflow(to_addr, out_amount, out_amount)
+                    _add_step(path_id, {
+                        "step_index": 0,
+                        "from": from_addr,
+                        "to": to_addr,
+                        "tx_hash": tx_hash,
+                        "chain": chain,
+                        "asset": asset,
+                        "amount_estimate": out_amount,
+                        "attributed_amount": out_amount,
+                        "time": block_time,
+                        "direction": "out",
+                        "step_type": "direct_transfer",
+                        "service_label": None,
+                        "protocol": None,
+                        "reasoning": f"UTXO output {idx + 1}/{len(utxo_outputs)} from theft transaction.",
+                    })
+
+                    hop_queue.append(HopJob(
+                        path_id=path_id,
+                        current_address=to_addr,
+                        incoming_tx_hash=tx_hash,
+                        incoming_amount=out_amount,
+                        incoming_time=block_time,
+                        chain=chain,
+                        asset=asset,
+                        token_id=int(token_id or 0),
+                        hop_index=1,
+                        attributed_amount=out_amount,
+                    ))
+
+                path_counter = max(path_counter, 1 + len(utxo_outputs))
+
+            else:
+                # ── Account-model chain: single transfer (existing logic) ──
+                transfer = await _resolve_transfer(
+                    tx_hash, chain,
+                    address_hint=victim_address,
+                    token_id_val=token_id_hint,
+                )
+                if not transfer or not transfer.get("from") or not transfer.get("to"):
+                    raise RuntimeError("Unable to extract theft transfer details from tx_hash")
+
+                from_addr = transfer["from"]
+                to_addr = transfer["to"]
+                amount = self._resolve_amount(tx_hash, transfer.get("amount", 0.0), chain, all_txs_map, asset)
+                block_time = transfer.get("block_time")
+                token_id = transfer.get("token_id") or token_id_hint
+                if transfer.get("output_owner"):
+                    owner_hints[to_addr] = transfer.get("output_owner")
+                if transfer.get("input_riskscore") is not None:
+                    risk_map[from_addr] = float(transfer.get("input_riskscore") or 0.0)
+                if transfer.get("output_riskscore") is not None:
+                    risk_map[to_addr] = float(transfer.get("output_riskscore") or 0.0)
+
+                paths["1"] = {
+                    "path_id": "1",
+                    "description": "Primary theft flow",
+                    "steps": [],
+                    "stop_reason": None,
+                }
+                _ensure_entity(from_addr, "victim", 0.0, notes="Victim")
+                theft_amount = float(amount or 0.0)
+                if stolen_amount <= 0:
+                    stolen_amount = theft_amount
+                    fifo_ledger.stolen_amount = stolen_amount
+                    fifo_ledger.cap = stolen_amount * (1.0 + traced_tolerance) if stolen_amount > 0 else float("inf")
+                fifo_ledger.record_inflow(to_addr, theft_amount, theft_amount)
+                _add_step("1", {
+                    "step_index": 0,
+                    "from": from_addr,
+                    "to": to_addr,
+                    "tx_hash": tx_hash,
+                    "chain": chain,
+                    "asset": asset,
+                    "amount_estimate": theft_amount,
+                    "attributed_amount": theft_amount,
+                    "time": block_time,
+                    "direction": "out",
+                    "step_type": "direct_transfer",
+                    "service_label": None,
+                    "protocol": None,
+                    "reasoning": "Primary theft transaction provided by user.",
+                })
+
+                self._collect_token_transfer_data(
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
+                    {"tx_hash": tx_hash, "blockchain_name": chain},
+                    all_txs_map,
+                    risk_map,
+                    txs_collected,
+                    tx_list_collected,
+                    txs_seen,
+                )
+
+                hop_queue.append(HopJob(
+                    path_id="1",
+                    current_address=to_addr,
+                    incoming_tx_hash=tx_hash,
+                    incoming_amount=theft_amount,
+                    incoming_time=block_time,
+                    chain=chain,
+                    asset=asset,
+                    token_id=int(token_id or 0),
+                    hop_index=1,
+                    attributed_amount=theft_amount,
+                ))
         elif victim_address:
             paths["1"] = {
                 "path_id": "1",
@@ -2465,6 +2703,10 @@ class BaseTracer(ABC):
                     amount_raw = transfer.get("amount_coerced")
                 block_time = tx_info.get("block_time") or transfer.get("block_time") or 0
 
+                is_utxo = chain in self._SATOSHI_CHAINS
+                tx_type = "tx" if is_utxo else "txEth"
+                tx_path = None if is_utxo else "0"
+
                 if tx_hash and tx_hash not in txs_seen:
                     idx = len(txs_collected)
                     txs_seen.add(tx_hash)
@@ -2476,8 +2718,8 @@ class BaseTracer(ABC):
                         "x": 100 + idx * 40,
                         "y": 100 + idx * 40,
                         "color": "#EC292C",
-                        "path": "0",
-                        "type": "txEth"
+                        "path": tx_path,
+                        "type": tx_type
                     })
 
                 if tx_hash and from_addr and to_addr:
@@ -2493,22 +2735,135 @@ class BaseTracer(ABC):
                         # Convert coerced amount back to base units for TRX UI helpers.
                         amount_val = float(transfer.get("amount_coerced") or 0.0) * 1e6
 
+                    fiat_rate = transfer.get("fiat_rate") or transfer.get("fiatRate") or 1.0
+
                     tx_list_collected.append({
                         "inputs": [{"address": from_addr, "riskscore": riskscore_from}],
                         "outputs": [{"address": to_addr, "riskscore": riskscore_to}],
                         "hash": tx_hash,
-                        "fiatRate": 1.0,
+                        "fiatRate": fiat_rate,
                         "addressesCount": 2,
                         "amount": amount_val,
                         "currency": chain,
                         "tokenId": token_id,
                         "poolTime": block_time,
                         "date": block_time,
-                        "path": "0",
-                        "type": "txEth"
+                        "path": tx_path,
+                        "type": tx_type
                     })
         except Exception:
             pass
+
+    def _collect_utxo_tx_data(
+        self,
+        tx_hash: str,
+        chain: str,
+        utxo_outputs: list[dict[str, Any]],
+        risk_map: dict,
+        txs_collected: list,
+        tx_list_collected: list,
+        txs_seen: set,
+    ):
+        """Collect full UTXO transaction data for visualization.
+
+        Creates a single txs entry and a single txList entry that contain
+        ALL inputs and outputs of the UTXO transaction.
+        """
+        if not utxo_outputs or tx_hash in txs_seen:
+            return
+
+        first = utxo_outputs[0]
+        from_addr = first.get("from")
+        block_time = first.get("block_time") or 0
+        token_id = first.get("token_id") or 0
+        fiat_rate = first.get("_fiat_rate") or first.get("fiat_rate") or 1.0
+        raw_inputs = first.get("_raw_inputs", [])
+        raw_outputs = first.get("_raw_outputs", [])
+        total_in = first.get("_total_in") or sum(float(o.get("amount", 0)) for o in utxo_outputs)
+
+        idx = len(txs_collected)
+        txs_seen.add(tx_hash)
+
+        txs_collected.append({
+            "currency": chain,
+            "descriptor": f"{tx_hash}-{chain}-{token_id}-null",
+            "hash": tx_hash,
+            "token_id": token_id,
+            "x": 100 + idx * 40,
+            "y": 100 + idx * 40,
+            "color": "#D15AE4",
+            "path": None,
+            "type": "tx"
+        })
+
+        # Build full inputs array
+        inputs_list = []
+        if isinstance(raw_inputs, list):
+            for inp in raw_inputs:
+                if not isinstance(inp, dict):
+                    continue
+                addr = inp.get("address")
+                if addr:
+                    rs = risk_map.get(addr, float(inp.get("riskscore") or 0.0))
+                    inputs_list.append({
+                        "address": addr,
+                        "amount": inp.get("amount"),
+                        "owner": inp.get("owner"),
+                        "riskscore": rs,
+                    })
+        if not inputs_list and from_addr:
+            inputs_list = [{"address": from_addr, "riskscore": risk_map.get(from_addr, 0.0)}]
+
+        # Build full outputs array
+        outputs_list = []
+        if isinstance(raw_outputs, list):
+            for out in raw_outputs:
+                if not isinstance(out, dict):
+                    continue
+                addr = out.get("address")
+                if addr:
+                    rs = risk_map.get(addr, float(out.get("riskscore") or 0.0))
+                    outputs_list.append({
+                        "address": addr,
+                        "amount": out.get("amount"),
+                        "owner": out.get("owner"),
+                        "pos": out.get("pos"),
+                        "riskscore": rs,
+                        "next": out.get("next"),
+                    })
+        if not outputs_list:
+            for uout in utxo_outputs:
+                to_addr = uout.get("to")
+                if to_addr:
+                    outputs_list.append({
+                        "address": to_addr,
+                        "amount": uout.get("amount"),
+                        "riskscore": risk_map.get(to_addr, float(uout.get("output_riskscore") or 0.0)),
+                    })
+
+        unique_addrs = set()
+        for inp in inputs_list:
+            if inp.get("address"):
+                unique_addrs.add(inp["address"])
+        for out in outputs_list:
+            if out.get("address"):
+                unique_addrs.add(out["address"])
+
+        tx_list_collected.append({
+            "inputs": inputs_list,
+            "outputs": outputs_list,
+            "hash": tx_hash,
+            "fiatRate": fiat_rate,
+            "addressesCount": len(unique_addrs),
+            "amount": total_in,
+            "fee": first.get("_fee"),
+            "currency": chain,
+            "tokenId": token_id,
+            "poolTime": block_time,
+            "date": block_time,
+            "path": None,
+            "type": "tx"
+        })
 
     async def _retry_json_response(self, messages: list, message) -> dict[str, Any]:
         """Retry to get valid JSON from LLM after failed parse."""

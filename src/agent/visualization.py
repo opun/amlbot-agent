@@ -381,6 +381,11 @@ def generate_visualization_payload(
         if src_desc == tgt_desc:
             y_offset = 0
 
+        _UTXO_CHAINS = {"btc", "bch", "ltc"}
+        is_utxo = chain in _UTXO_CHAINS
+        tx_type = "tx" if is_utxo else "txEth"
+        tx_path = None if is_utxo else "0"
+
         if tx_desc not in tx_desc_seen:
             txs_output.append({
                 "currency": chain,
@@ -390,17 +395,19 @@ def generate_visualization_payload(
                 "x": mid_x,
                 "y": mid_y + y_offset,
                 "color": edge_color,
-                "path": "0",
-                "type": "txEth"
+                "path": tx_path,
+                "type": tx_type
             })
             tx_desc_seen.add(tx_desc)
+
+        step_amount = step.amount_estimate if step.amount_estimate else None
 
         connects.append({
             "source": src_desc,
             "target": tx_desc,
             "data": {
                 "currency": chain,
-                "amount": None,
+                "amount": step_amount,
                 "fiatRate": 1.0,
                 "token_id": token_id,
                 "color": edge_color,
@@ -414,7 +421,7 @@ def generate_visualization_payload(
             "target": tgt_desc,
             "data": {
                 "currency": chain,
-                "amount": None,
+                "amount": step_amount,
                 "fiatRate": 1.0,
                 "token_id": token_id,
                 "color": edge_color,
@@ -453,8 +460,8 @@ def generate_visualization_payload(
                 "tokenId": token_id,
                 "poolTime": _get_timestamp(step.time),
                 "date": _get_timestamp(step.time),
-                "path": "0",
-                "type": "txEth",
+                "path": tx_path,
+                "type": tx_type,
                 # Extra metadata for UI
                 "reasoning": step.reasoning,
                 "step_type": step.step_type,
@@ -464,13 +471,15 @@ def generate_visualization_payload(
 
         if token_id not in currency_info:
             asset_upper = (step.asset or "").upper()
+            _UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8}
+            unit = _UNIT_MAP.get(chain, 6)
             currency_info[token_id] = {
                 "currency": chain,
                 "issuer": None,
                 "name": "Tether USD" if asset_upper == "USDT" else step.asset,
                 "symbol": asset_upper if asset_upper else step.asset,
                 "token_id": token_id,
-                "unit": 6
+                "unit": unit
             }
 
     # --- Generate autoTxs ---

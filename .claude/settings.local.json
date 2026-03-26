@@ -21,7 +21,11 @@
       "Bash(ls /Users/opun/GitHub/AMLBot/amlbot-agent/docker-compose*.yml)",
       "Bash(curl -s http://localhost:8000/api/health)",
       "Bash(pkill -f \"uvicorn agent.api\")",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(PYTHONPATH=src python -c \"from agent.visualization import generate_visualization_payload; print\\('visualization import: OK'\\)\")",
+      "Bash(PYTHONPATH=src python -c \"from agent.base_tracer import BaseTracer; print\\('base_tracer import: OK'\\)\")",
+      "Bash(PYTHONPATH=src python -m pytest tests/ -x -q)",
+      "Bash(source .venv/bin/activate)"
     ]
   }
 }

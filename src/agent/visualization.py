@@ -477,8 +477,7 @@ def generate_visualization_payload(
     auto_txs = []
 
     for (address, chain, token_id), activities in address_activity.items():
-        if address in service_comment_map:
-            continue
+        if address in service_comment_map: continue # Skip service nodes for autoTxs?
 
         # Sort by step index
         activities.sort(key=lambda x: x["index"])

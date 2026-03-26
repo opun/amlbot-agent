@@ -32,13 +32,6 @@ dev = [
     "mypy>=1.13.0",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest>=7.0.0",
-    "ruff>=0.8.0",
-    "mypy>=1.13.0",
-]
-
 [tool.ruff]
 target-version = "py312"
 line-length = 120
@@ -57,14 +50,10 @@ ignore = [
     "E501",  # line too long (handled by formatter)
     "S101",  # assert usage (OK in tests)
     "B008",  # function call in default arg (pydantic Field)
-    "S110",  # try-except-pass (intentional in tracing/telemetry guards)
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
-"src/agent/__init__.py" = ["E402"]
-"src/agent/api.py" = ["E402", "S104"]
-"src/agent/tool_dispatch.py" = ["S105"]
 
 [tool.mypy]
 python_version = "3.12"

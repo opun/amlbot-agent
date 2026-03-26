@@ -36,7 +36,7 @@ async def dispatch_tool(client: Any, tool_name: str, arguments: dict[str, Any]) 
     try:
         key = ToolName(tool_name)
     except ValueError:
-        raise ValueError(f"Unknown tool: {tool_name}") from None
+        raise ValueError(f"Unknown tool: {tool_name}")
 
     handler = dispatch[key]
     return await handler(client, arguments)

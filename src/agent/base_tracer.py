@@ -1534,16 +1534,13 @@ class BaseTracer(ABC):
             # --- resolve sender ---
             from_addr = None
             inp_riskscore = None
-            inp_owner = None
             if isinstance(inp, dict):
                 from_addr = inp.get("address")
                 inp_riskscore = inp.get("riskscore")
-                inp_owner = inp.get("owner")
             elif isinstance(inp, list) and inp:
                 first_inp = inp[0] if isinstance(inp[0], dict) else {}
                 from_addr = first_inp.get("address")
                 inp_riskscore = first_inp.get("riskscore")
-                inp_owner = first_inp.get("owner")
 
             if not from_addr:
                 from_addr = tx_data.get("from") or tx_data.get("sender")

@@ -1,7 +1,9 @@
 import asyncio
+import os
 import sys
 import json
 import termios
+import time
 from typing import Optional
 
 from agents import gen_trace_id, trace
@@ -16,8 +18,8 @@ def flush_input():
     """Flush standard input to avoid skipping prompts due to pasted multi-line text."""
     try:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except Exception:
-        pass
+    except (termios.error, OSError):
+        pass  # Not a TTY or stdin unavailable
 
 async def run_trace(
     description: Optional[str] = None,
@@ -42,12 +44,16 @@ async def run_trace(
         print(f"Starting trace on {blockchain}...")
 
     # Setup MCP Server
+    mcp_user_id = os.getenv("MCP_USER_ID")
+    if not mcp_user_id:
+        print("Error: MCP_USER_ID environment variable is required.")
+        sys.exit(1)
+
     async with MCPServerStdio(
         name="AMLBot MCP Server",
         params={
             "command": "docker",
-            "args": ["run", "-i", "--rm", "-e", "USER_ID=a2fa961b7f4977981e3796916328d930", "mcp-server-amlbot:local"]
-            # "args": ["run", "-i", "-e", "USER_ID=a2fa961b7f4977981e3796916328d930", "mcp-server-amlbot:local"]
+            "args": ["run", "-i", "--rm", "-e", f"USER_ID={mcp_user_id}", "mcp-server-amlbot:local"]
         },
         client_session_timeout_seconds=300.0,
     ) as server:

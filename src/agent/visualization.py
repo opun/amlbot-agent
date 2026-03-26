@@ -43,12 +43,12 @@ def _get_timestamp(t: Any) -> int:
         # Try numeric string
         try:
             return int(float(t))
-        except Exception:
+        except (ValueError, OverflowError):
             pass
         # Try ISO date/time
         try:
             return int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp())
-        except Exception:
+        except (ValueError, TypeError):
             return 0
     return 0
 
@@ -189,13 +189,13 @@ def generate_visualization_payload(
             if "tokenId" in norm and norm["tokenId"] is not None:
                 try:
                     norm["tokenId"] = int(norm["tokenId"])
-                except Exception:
-                    pass
+                except (ValueError, TypeError):
+                    logger.warning("Could not convert tokenId to int: %s", norm["tokenId"])
             if "token_id" in norm and norm["token_id"] is not None:
                 try:
                     norm["token_id"] = int(norm["token_id"])
-                except Exception:
-                    pass
+                except (ValueError, TypeError):
+                    logger.warning("Could not convert token_id to int: %s", norm["token_id"])
             tx_list_inputs.append(norm)
     use_provided_tx_list = bool(tx_list_inputs)
     
@@ -217,7 +217,7 @@ def generate_visualization_payload(
     if tx_list_inputs:
         try:
             asset_hint = (trace_result.case_meta.asset_symbol or "").upper()
-        except Exception:
+        except AttributeError:
             asset_hint = ""
         for tx in tx_list_inputs:
             chain = _normalize_chain(tx.get("currency"))
@@ -249,8 +249,8 @@ def generate_visualization_payload(
             if token_id is not None:
                 try:
                     token_id = int(token_id)
-                except Exception:
-                    pass
+                except (ValueError, TypeError):
+                    logger.warning("Could not convert token_id to int in txs: %s", token_id)
                 norm["token_id"] = token_id
             desc = norm.get("descriptor")
             if desc:

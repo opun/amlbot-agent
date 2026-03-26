@@ -4,7 +4,7 @@ services:
     container_name: mcp-server-http
     restart: unless-stopped
     env_file:
-      - .mcp.env  
+      - .mcp.env
     # Expose only to localhost on the host (NOT public internet)
     ports:
       - "127.0.0.1:8001:8001"
@@ -16,6 +16,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
   aml-agent-api:
     image: ghcr.io/opun/amlbot-agent-api:latest
@@ -30,6 +35,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
 
   aml-agent-frontend:
     image: ghcr.io/opun/amlbot-agent-frontend:latest
@@ -41,6 +51,11 @@ services:
       - amlbot-network
     depends_on:
       - aml-agent-api
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
   caddy:
     image: caddy:2

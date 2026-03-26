@@ -50,7 +50,7 @@ def infer_approx_date_from_description(description: str) -> Optional[str]:
                 if candidate > today:
                     candidate = datetime(year - 1, int(num), int(day)).date()
                 return candidate.strftime("%Y-%m-%d")
-            except Exception:
+            except (ValueError, OverflowError):
                 return f"{year}-{num}-{day}"
 
         # Pattern: Month DD, YYYY or Month DD YYYY
@@ -149,8 +149,29 @@ Return a JSON object with the extracted fields."""
                 "btc": "btc",
                 "polygon": "poly",
                 "poly": "poly",
+                "matic": "poly",
                 "bsc": "bsc",
-                "binance": "bsc"
+                "binance": "bsc",
+                "bnb": "bsc",
+                "solana": "sol",
+                "sol": "sol",
+                "arbitrum": "arb",
+                "arb": "arb",
+                "optimism": "op",
+                "op": "op",
+                "avalanche": "avax",
+                "avax": "avax",
+                "base": "base",
+                "bitcoin cash": "bch",
+                "bch": "bch",
+                "litecoin": "ltc",
+                "ltc": "ltc",
+                "ethereum classic": "etc",
+                "etc": "etc",
+                "cardano": "ada",
+                "ada": "ada",
+                "ripple": "xrp",
+                "xrp": "xrp",
             }
             parsed["blockchain_name"] = blockchain_map.get(blockchain, blockchain)
         else:
@@ -183,82 +204,226 @@ Return a JSON object with the extracted fields."""
         logger.warning(f"Error parsing case description with LLM: {e}")
         return {}
 
+_EVM_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+_EVM_CHAINS = {"eth", "bsc", "matic", "arb", "op", "base", "avax", "etc"}
+
+
+def _extract_address_from_expert_search(result: Any) -> Optional[str]:
+    """Try to extract a usable address from an expert_search response."""
+    if not isinstance(result, dict):
+        return None
+
+    logger.debug(f"expert_search raw response: {json.dumps(result, default=str)[:1000]}")
+
+    # expert_search may return data in various shapes; walk it defensively
+    data = result.get("data")
+    if isinstance(data, dict):
+        # Single-entry response — look for address-like fields
+        for key in ("address", "hash", "input", "output", "from", "to"):
+            val = data.get(key)
+            if isinstance(val, str) and len(val) >= 26:
+                return val
+            if isinstance(val, dict):
+                addr = val.get("address")
+                if isinstance(addr, str) and len(addr) >= 26:
+                    return addr
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            # Entries might have currencies + slug, or might have address fields
+            for key in ("address", "hash", "slug"):
+                val = entry.get(key)
+                if isinstance(val, str) and len(val) >= 26:
+                    return val
+    return None
+
+
+def _parse_get_transaction_result(
+    result: Any, tx_hash: str, blockchain_name: str
+) -> Tuple[str, int, Optional[str], Optional[int]]:
+    """Parse get_transaction result into (victim_address, token_id, asset_symbol, block_time).
+
+    Handles both account-model chains (ETH — single input/output) and
+    UTXO-model chains (BTC — input/output may be nested or list-based).
+    """
+    if isinstance(result, dict) and "text" in result:
+        try:
+            result = json.loads(result["text"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    if isinstance(data, list) and data:
+        # Some endpoints return a list of transaction entries
+        data = data[0]
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"get_transaction returned no data for {tx_hash}")
+
+    logger.debug(f"get_transaction response keys: {list(data.keys())}")
+
+    victim_address = None
+    recipient_address = None
+
+    # Account-model: input/output are dicts with .address
+    input_data = data.get("input") or data.get("inputs")
+    output_data = data.get("output") or data.get("outputs")
+
+    if isinstance(input_data, dict):
+        victim_address = input_data.get("address")
+    elif isinstance(input_data, list) and input_data:
+        # UTXO-model: inputs is a list of {address, ...}
+        first_input = input_data[0]
+        if isinstance(first_input, dict):
+            victim_address = first_input.get("address")
+
+    if isinstance(output_data, dict):
+        recipient_address = output_data.get("address")
+    elif isinstance(output_data, list) and output_data:
+        first_output = output_data[0]
+        if isinstance(first_output, dict):
+            recipient_address = first_output.get("address")
+
+    # Fallback to top-level fields
+    if not victim_address:
+        victim_address = data.get("from") or data.get("sender")
+    if not victim_address:
+        raise ValueError(
+            f"get_transaction has no input address for {tx_hash} "
+            f"(keys: {list(data.keys())})"
+        )
+
+    token_id = data.get("token_id", 0) or 0
+    block_time = data.get("block_time")
+    asset_symbol = data.get("asset") or data.get("symbol")
+    if not asset_symbol and token_id == 0:
+        native_map = {"eth": "ETH", "bsc": "BNB", "trx": "TRX", "btc": "BTC",
+                       "bch": "BCH", "ltc": "LTC", "sol": "SOL", "ada": "ADA",
+                       "xrp": "XRP", "poly": "MATIC"}
+        asset_symbol = native_map.get(blockchain_name, blockchain_name.upper())
+
+    return victim_address, int(token_id), asset_symbol, block_time
+
+
 async def extract_victim_from_tx_hash(
     tx_hash: str,
     blockchain_name: str,
     client: AnyMCPClient
 ) -> Tuple[str, int, Optional[str], Optional[int]]:
     """
-    Extract victim address from a transaction hash using token-transfers.
+    Extract victim address from a transaction hash.
+    Tries token-transfers first (ERC-20), then falls back to
+    expert_search + get_transaction for native transfers.
     Returns: (victim_address, token_id, asset_symbol, block_time)
     """
     logger.debug(f"Extracting victim address from tx_hash: {tx_hash} using token-transfers")
 
     try:
-        # Use token-transfers tool
+        # Step 1: Try token-transfers (works for ERC-20 / token transfers)
+        # On unsupported chains (BTC, BCH, LTC, etc.) this may return 400 —
+        # catch the error and fall through to the native tx fallback.
+        data = []
         tool_input = json.dumps({"tx_hash": tx_hash, "blockchain_name": blockchain_name})
-        with function_span("token_transfers", input=tool_input) as tool_span:
-            try:
-                result = await client.token_transfers(tx_hash, blockchain_name)
+        try:
+            with function_span("token_transfers", input=tool_input) as tool_span:
                 try:
-                    if hasattr(tool_span, "span_data"):
-                        tool_span.span_data.output = {"status": "ok"}
-                except Exception:
+                    result = await client.token_transfers(tx_hash, blockchain_name)
+                    try:
+                        if hasattr(tool_span, "span_data"):
+                            tool_span.span_data.output = {"status": "ok"}
+                    except AttributeError:
+                        pass
+                except Exception as e:
+                    try:
+                        tool_span.set_error({"message": str(e), "data": {"tool": "token_transfers"}})
+                    except AttributeError:
+                        pass
+                    raise
+
+            # Handle text-wrapped JSON response
+            if isinstance(result, dict) and "text" in result:
+                try:
+                    result = json.loads(result["text"])
+                except (json.JSONDecodeError, TypeError):
                     pass
+
+            data = result.get("data", [])
+        except Exception as e:
+            logger.info(f"token_transfers failed for {tx_hash} on {blockchain_name}: {e}")
+
+        if data:
+            # Token transfer found — parse it
+            def _amount(tr):
+                amt = tr.get("amount") or tr.get("amount_coerced") or tr.get("value")
+                try:
+                    return float(amt)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            transfer = max(data, key=_amount)
+            input_data = transfer.get("input", {})
+            victim_address = input_data.get("address") if isinstance(input_data, dict) else None
+            if not victim_address:
+                victim_address = transfer.get("from")
+            if not victim_address:
+                raise ValueError(f"Could not find input address in transfer data for {tx_hash}")
+
+            token_id = transfer.get("token_id", 0) or transfer.get("tokenId", 0)
+            block_time = transfer.get("block_time")
+
+            asset_symbol = None
+            if transfer.get("asset"):
+                asset_symbol = transfer.get("asset")
+            elif transfer.get("symbol"):
+                asset_symbol = transfer.get("symbol")
+            elif isinstance(transfer.get("token"), dict):
+                asset_symbol = transfer["token"].get("symbol") or transfer["token"].get("name")
+            if token_id == 0 and not asset_symbol:
+                asset_symbol = "ETH" if blockchain_name == "eth" else blockchain_name.upper()
+
+            logger.debug(f"Found victim address: {victim_address}, token_id: {token_id}")
+            return victim_address, token_id, asset_symbol, block_time
+
+        # Step 2: No token transfer data — likely a native transfer.
+        # Try multiple strategies to discover from/to addresses.
+        logger.info(f"No token transfers for {tx_hash} on {blockchain_name}; trying native tx fallback")
+
+        # Strategy A: expert_search to discover an involved address
+        search_result = await client.expert_search(tx_hash, "explorer")
+        discovered_address = _extract_address_from_expert_search(search_result)
+
+        if discovered_address:
+            logger.info(f"expert_search found address: {discovered_address}")
+
+        # Strategy B: For EVM chains, try zero address — the API may resolve by tx_hash alone
+        addresses_to_try = []
+        if discovered_address:
+            addresses_to_try.append(discovered_address)
+        if blockchain_name in _EVM_CHAINS:
+            addresses_to_try.append(_EVM_ZERO_ADDRESS)
+
+        last_error = None
+        for addr in addresses_to_try:
+            try:
+                logger.info(f"Trying get_transaction with address={addr[:16]}...")
+                tx_result = await client.get_transaction(
+                    addr, tx_hash, blockchain_name, token_id=0, path="0"
+                )
+                logger.debug(f"get_transaction response: {json.dumps(tx_result, default=str)[:1000]}")
+                return _parse_get_transaction_result(tx_result, tx_hash, blockchain_name)
             except Exception as e:
-                try:
-                    tool_span.set_error({"message": str(e), "data": {"tool": "token_transfers"}})
-                except Exception:
-                    pass
-                raise
+                last_error = e
+                logger.info(f"get_transaction with address={addr[:16]}... failed: {e}")
+                continue
 
-        # Handle text-wrapped JSON response
-        if isinstance(result, dict) and "text" in result:
-            try:
-                result = json.loads(result["text"])
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        data = result.get("data", [])
-        if not data:
-            raise ValueError(f"No transfer data found for transaction {tx_hash}")
-
-        # Choose the transfer with the largest amount (more reliable than first)
-        def _amount(tr):
-            amt = tr.get("amount") or tr.get("amount_coerced") or tr.get("value")
-            try:
-                return float(amt)
-            except Exception:
-                return 0.0
-
-        transfer = max(data, key=_amount)
-
-        # Extract details
-        # The input address is the sender, which is typically the victim in a theft context
-        input_data = transfer.get("input", {})
-        victim_address = input_data.get("address") if isinstance(input_data, dict) else None
-        if not victim_address:
-            victim_address = transfer.get("from")
-
-        if not victim_address:
-             raise ValueError(f"Could not find input address in transfer data for {tx_hash}")
-
-        token_id = transfer.get("token_id", 0) or transfer.get("tokenId", 0)
-        block_time = transfer.get("block_time")
-
-        # Infer asset symbol
-        asset_symbol = None
-        if transfer.get("asset"):
-            asset_symbol = transfer.get("asset")
-        elif transfer.get("symbol"):
-            asset_symbol = transfer.get("symbol")
-        elif isinstance(transfer.get("token"), dict):
-            asset_symbol = transfer["token"].get("symbol") or transfer["token"].get("name")
-        if token_id == 0 and not asset_symbol:
-            asset_symbol = "ETH" if blockchain_name == "eth" else blockchain_name.upper()
-
-        logger.debug(f"Found victim address: {victim_address}, token_id: {token_id}")
-        return victim_address, token_id, asset_symbol, block_time
+        # All strategies exhausted
+        raise ValueError(
+            f"Could not extract victim from native tx {tx_hash} on {blockchain_name}. "
+            f"expert_search address: {discovered_address}, "
+            f"last error: {last_error}. "
+            f"For UTXO chains (BTC/BCH/LTC), provide victim_address alongside tx_hash."
+        )
 
     except Exception as e:
         logger.error(f"Error extracting victim from tx_hash {tx_hash}: {e}")
@@ -280,8 +445,8 @@ async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> Tupl
                 for t in tokens:
                     if t.get("symbol", "").upper() == config.theft_asset.upper():
                         return config.theft_asset, t.get("token_id", 0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to get token stats for theft_asset lookup: %s", e)
         # Fallback: return the provided asset with token_id 0 (will be updated from transaction if available)
         return config.theft_asset, 0
 
@@ -295,8 +460,8 @@ async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> Tupl
                 for t in tokens:
                     if t.get("symbol", "").upper() == config.asset_symbol.upper():
                         return config.asset_symbol, t.get("token_id", 0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to get token stats for asset_symbol lookup: %s", e)
         # Fallback: return provided asset with token_id 0
         return config.asset_symbol, 0
 

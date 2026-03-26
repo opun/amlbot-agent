@@ -1,19 +1,53 @@
 from typing import List, Optional, Dict, Any, Literal, Union
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+SUPPORTED_BLOCKCHAINS = {"eth", "trx", "btc", "bsc", "matic", "sol", "arb", "op", "avax", "base", "bch", "ltc", "etc", "ada", "xrp"}
+
+# Aliases accepted by users/frontend that map to SAILS currency codes
+_BLOCKCHAIN_ALIASES = {
+    "poly": "matic",
+    "polygon": "matic",
+    "bnb": "bsc",
+    "binance": "bsc",
+    "bep20": "bsc",
+    "tron": "trx",
+    "trc": "trx",
+    "trc20": "trx",
+    "ethereum": "eth",
+}
+
 
 class TracerConfig(BaseModel):
     description: Optional[str] = None
-    victim_address: Optional[str] = None
+    victim_address: Optional[str] = Field(default=None, min_length=1)
     blockchain_name: str = "eth"
     asset_symbol: Optional[str] = None
     approx_date: Optional[str] = None
     known_tx_hashes: List[str] = Field(default_factory=list)
     tx_hash: Optional[str] = None
     theft_asset: Optional[str] = None
-    stolen_amount: Optional[float] = None
-    cex_single_cluster_threshold: float = 0.60
-    traced_amount_tolerance: float = 0.03
+    stolen_amount: Optional[float] = Field(default=None, ge=0)
+    cex_single_cluster_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    traced_amount_tolerance: float = Field(default=0.03, ge=0.0, le=1.0)
+
+    @field_validator("blockchain_name")
+    @classmethod
+    def validate_blockchain(cls, v: str) -> str:
+        v_lower = v.lower()
+        v_lower = _BLOCKCHAIN_ALIASES.get(v_lower, v_lower)
+        if v_lower not in SUPPORTED_BLOCKCHAINS:
+            raise ValueError(f"Unsupported blockchain: {v}. Supported: {', '.join(sorted(SUPPORTED_BLOCKCHAINS))}")
+        return v_lower
+
+    @field_validator("victim_address")
+    @classmethod
+    def validate_victim_address(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                return None
+        return v
 
 class CaseMeta(BaseModel):
     case_id: str
@@ -36,7 +70,7 @@ class Step(BaseModel):
     chain: str
     asset: str
     amount_estimate: float
-    time: Optional[Union[str, int]] # Allow int input
+    time: Optional[Union[str, int]] = None  # Unix timestamp (int) or ISO 8601 string
     direction: str
     step_type: Literal["direct_transfer", "bridge_in", "bridge_out", "bridge_transfer", "bridge_arrival", "service_deposit", "internal_transfer"]
     service_label: Optional[str] = None
@@ -53,7 +87,7 @@ class Path(BaseModel):
 class Entity(BaseModel):
     address: str
     chain: str
-    role: Literal["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "otc_service", "unidentified_service", "cluster"]
+    role: Literal["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "dex_service", "otc_service", "unidentified_service", "cluster"]
     risk_score: Optional[float] = None
     riskscore_signals: Dict[str, float] = Field(default_factory=dict)
     labels: List[str] = Field(default_factory=list)
@@ -72,6 +106,7 @@ class TraceStats(BaseModel):
     terminated_reason: Optional[str] = None
     total_traced_amount: Optional[float] = None
     stolen_amount: Optional[float] = None
+    fifo_audit_log: Optional[List[dict]] = None
 
 class TraceResult(BaseModel):
     case_meta: CaseMeta

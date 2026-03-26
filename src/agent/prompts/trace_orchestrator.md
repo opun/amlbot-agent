@@ -354,7 +354,7 @@ Return a JSON object matching the TraceResult structure:
   - **IMPORTANT**: amount_estimate must be a number (float), do NOT include currency symbol.
   - **IMPORTANT**: step_type must be one of: ["direct_transfer", "bridge_in", "bridge_out", "bridge_transfer", "bridge_arrival", "service_deposit", "internal_transfer"].
   - **IMPORTANT**: reasoning should explain: "Selected as tx #N in chronological order. Accumulated: X of Y total. Selected because..."
-- entities: list of objects (address, chain, role, risk_score, riskscore_signals, labels, notes). **IMPORTANT**: role must be one of ["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "otc_service", "unidentified_service", "cluster"]. If unknown, use "intermediate" or "unidentified_service" based on context.
+- entities: list of objects (address, chain, role, risk_score, riskscore_signals, labels, notes). **IMPORTANT**: role must be one of ["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "dex_service", "otc_service", "unidentified_service", "cluster"]. If unknown, use "intermediate" or "unidentified_service" based on context.
 - annotations: list of objects (id, label, related_addresses, related_steps, text). related_steps should be a list of strings (step IDs or indices as strings).
 - trace_stats: {{initial_amount_estimate, explored_paths, terminated_reason}}. **IMPORTANT**: initial_amount_estimate must be a number (float), do NOT include currency symbol.
 

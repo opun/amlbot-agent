@@ -34,7 +34,7 @@ from .visualization import generate_visualization_payload
 from .config import ModelConfig
 
 logger = logging.getLogger("tracer")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("[TRACE] %(message)s"))
@@ -45,6 +45,8 @@ if not logger.handlers:
 OPENAI_TIMEOUT = 90
 OPENAI_CONNECT_TIMEOUT = 10
 TOOL_TIMEOUT = 30
+TOOL_TIMEOUT_SLOW = 60
+_SLOW_TOOLS = frozenset({"all_txs", "bridge_analyze"})
 MAX_TOOL_CALLS_PER_TURN = 6
 MAX_TOKEN_TRANSFERS_PER_TURN = 2
 
@@ -79,12 +81,25 @@ class FIFOLedger:
         self.cap = stolen_amount * (1.0 + tolerance) if stolen_amount > 0 else float("inf")
         self.total_traced: float = 0.0
         self._queues: Dict[str, List[Dict[str, float]]] = {}
+        self._audit_log: List[Dict[str, Any]] = []
+
+    @property
+    def audit_log(self) -> List[Dict[str, Any]]:
+        return self._audit_log
 
     def record_inflow(self, address: str, amount: float, theft_share: float):
         """Record an inflow to an address. theft_share is the attributed theft portion."""
+        clamped_share = min(theft_share, amount)
         self._queues.setdefault(address, []).append({
             "amount": amount,
-            "theft_share": min(theft_share, amount),
+            "theft_share": clamped_share,
+        })
+        self._audit_log.append({
+            "op": "inflow",
+            "address": address,
+            "amount": amount,
+            "theft_share": clamped_share,
+            "queue_len": len(self._queues[address]),
         })
 
     def attribute_outflow(self, address: str, outflow_amount: float) -> float:
@@ -99,6 +114,7 @@ class FIFOLedger:
 
         remaining = outflow_amount
         attributed = 0.0
+        entries_drained = 0
 
         while remaining > 0 and queue:
             entry = queue[0]
@@ -116,7 +132,16 @@ class FIFOLedger:
 
             if entry["amount"] <= 0.001:
                 queue.pop(0)
+                entries_drained += 1
 
+        self._audit_log.append({
+            "op": "outflow",
+            "address": address,
+            "outflow_amount": outflow_amount,
+            "attributed": attributed,
+            "entries_drained": entries_drained,
+            "queue_len": len(queue),
+        })
         return attributed
 
     def claim_terminal(self, attributed: float) -> float:
@@ -126,10 +151,24 @@ class FIFOLedger:
         Returns clamped amount (may be less if cap would be exceeded).
         """
         if self.stolen_amount <= 0:
+            self._audit_log.append({
+                "op": "terminal",
+                "attributed_input": attributed,
+                "clamped_output": attributed,
+                "total_traced_after": self.total_traced,
+                "headroom_before": float("inf"),
+            })
             return attributed
         headroom = max(0.0, self.cap - self.total_traced)
         clamped = min(attributed, headroom)
         self.total_traced += clamped
+        self._audit_log.append({
+            "op": "terminal",
+            "attributed_input": attributed,
+            "clamped_output": clamped,
+            "total_traced_after": self.total_traced,
+            "headroom_before": headroom,
+        })
         return clamped
 
     @property
@@ -376,8 +415,8 @@ class BaseTracer(ABC):
                 dumped = msg.model_dump()
                 if isinstance(dumped, dict):
                     return dumped
-            except Exception:
-                pass
+            except (TypeError, ValueError) as e:
+                logger.debug("model_dump failed for message: %s", e)
         role = getattr(msg, "role", None) or "assistant"
         content = getattr(msg, "content", None)
         if content is None:
@@ -429,7 +468,7 @@ class BaseTracer(ABC):
             if isinstance(riskscore, dict):
                 return float(riskscore.get("value", 0.0) or 0.0)
             return float(riskscore or 0.0)
-        except Exception:
+        except (TypeError, ValueError, AttributeError):
             return 0.0
 
     def _parse_transfer(
@@ -448,7 +487,7 @@ class BaseTracer(ABC):
             amt = tr.get("amount") or tr.get("amount_coerced") or tr.get("value")
             try:
                 return float(amt)
-            except Exception:
+            except (TypeError, ValueError):
                 return 0.0
 
         candidates = []
@@ -475,7 +514,7 @@ class BaseTracer(ABC):
         amount = transfer.get("amount_coerced") or transfer.get("amount") or transfer.get("value") or 0.0
         try:
             amount = float(amount)
-        except Exception:
+        except (TypeError, ValueError):
             amount = 0.0
         block_time = transfer.get("block_time")
         token_id_val = transfer.get("token_id") or transfer.get("tokenId") or 0
@@ -498,17 +537,18 @@ class BaseTracer(ABC):
         try:
             dt = datetime.fromisoformat(date_str)
             return int(dt.timestamp())
-        except Exception:
+        except ValueError:
             try:
                 dt = datetime.strptime(date_str, "%Y-%m-%d")
                 return int(dt.timestamp())
-            except Exception:
+            except ValueError:
+                logger.warning("Could not parse date string: %s", date_str)
                 return None
 
     def _normalize_amount(self, amount: Any, chain: str, asset: Optional[str] = None) -> float:
         try:
             val = float(amount)
-        except Exception:
+        except (TypeError, ValueError):
             return 0.0
         asset_upper = asset.upper() if isinstance(asset, str) else None
         six_dec_assets = {"USDT", "USDC", "TUSD", "USDP", "USDD", "BUSD"}
@@ -539,34 +579,59 @@ class BaseTracer(ABC):
                 return self._normalize_amount(amt, chain, asset)
         return self._normalize_amount(amount, chain, asset)
 
+    @staticmethod
+    def _extract_identity_texts(owner: Any, services: Any, owner_hint: Any = None) -> str:
+        """Extract only identity-relevant fields for keyword matching.
+
+        Targets: owner.name, owner.slug, owner.subtype from get_address;
+        services.use_platform[] from get_extra_address_info;
+        owner_hint.name, owner_hint.slug from token_transfers.
+        """
+        parts: List[str] = []
+
+        for obj in (owner, owner_hint):
+            if isinstance(obj, dict):
+                for key in ("name", "slug", "subtype", "title"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val:
+                        parts.append(val)
+
+        if isinstance(services, dict):
+            use_platform = services.get("use_platform")
+            if isinstance(use_platform, list):
+                parts.extend(str(x) for x in use_platform if x)
+
+        return " ".join(parts).lower()
+
     def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> Dict[str, Any]:
-        owner_texts = self._flatten_strings(owner)
-        hint_texts = self._flatten_strings(owner_hint)
-        service_texts = self._flatten_strings(services)
-        combined = " ".join(owner_texts + hint_texts + service_texts).lower()
+        combined = self._extract_identity_texts(owner, services, owner_hint)
 
         def _has_any(text: str, keywords: List[str]) -> bool:
             return any(k in text for k in keywords)
 
+        mixer_keywords = ["mixer", "tornado", "blender", "sinbad"]
+        otc_keywords = ["otc"]
+        cex_keywords = [
+            "exchange", "binance", "coinbase", "kraken", "okx", "huobi", "kucoin",
+            "bybit", "gate", "bitfinex", "mxc", "gate.io", "poloniex",
+        ]
         bridge_keywords = [
             "bridge", "layerzero", "stargate", "wormhole", "allbridge",
-            "synapse", "hop", "multichain", "bridger", "bridgers", "bridgers.xyz", "router"
+            "synapse", "hop", "multichain", "bridger", "bridgers", "bridgers.xyz",
+            "router", "across",
         ]
-        cex_keywords = ["exchange", "binance", "coinbase", "kraken", "okx", "huobi", "kucoin", "bybit", "gate"]
         dex_keywords = ["dex", "swap", "uniswap", "sushiswap", "pancakeswap", "curve"]
-        mixer_keywords = ["mixer", "tornado", "blender"]
-        otc_keywords = ["otc"]
 
         if _has_any(combined, mixer_keywords):
             return {"role": "unidentified_service", "terminal": True, "service_label": "Mixer", "protocol": None}
-        if _has_any(combined, cex_keywords):
-            return {"role": "cex_deposit", "terminal": True, "service_label": "Exchange", "protocol": None}
         if _has_any(combined, otc_keywords):
             return {"role": "otc_service", "terminal": False, "service_label": "OTC", "protocol": None}
+        if _has_any(combined, cex_keywords):
+            return {"role": "cex_deposit", "terminal": True, "service_label": "Exchange", "protocol": None}
         if _has_any(combined, bridge_keywords):
             return {"role": "bridge_service", "terminal": True, "service_label": "Bridge", "protocol": None}
         if _has_any(combined, dex_keywords):
-            return {"role": "bridge_service", "terminal": True, "service_label": "DEX", "protocol": None}
+            return {"role": "dex_service", "terminal": True, "service_label": "DEX", "protocol": None}
 
         return {"role": "intermediate", "terminal": False, "service_label": None, "protocol": None}
 
@@ -852,6 +917,7 @@ class BaseTracer(ABC):
                 response = await self.openai_client.chat.completions.create(
                     model=self.model_selector,
                     messages=messages,
+                    # temperature=0,
                     **self._max_tokens_arg(self.model_selector, 300)
                 )
                 try:
@@ -882,6 +948,7 @@ class BaseTracer(ABC):
                 response = await self.openai_client.chat.completions.create(
                     model=self.model_selector,
                     messages=messages,
+                    # temperature=0,
                     **self._max_tokens_arg(self.model_selector, 250)
                 )
                 try:
@@ -901,7 +968,7 @@ class BaseTracer(ABC):
 
     async def _run_validator(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         summary = self._summarize_payload(payload)
-        logger.info("[PROMPT=trace_validator] entities=%d paths=%d txs=%d", 
+        logger.info("[PROMPT=trace_validator] entities=%d paths=%d txs=%d",
                     summary["entities"], summary["paths"], summary["txs"])
         messages = [
             {"role": "system", "content": self._load_validator_prompt()},
@@ -1122,11 +1189,12 @@ class BaseTracer(ABC):
 
                         tool_input = json.dumps(arguments, ensure_ascii=False)
                         tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
+                        _to = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
                         with function_span(tool_name, input=tool_input) as tool_span:
                             try:
                                 result = await asyncio.wait_for(
                                     self.execute_tool(tool_name, arguments),
-                                    timeout=TOOL_TIMEOUT
+                                    timeout=_to
                                 )
                                 compact = self._compact_tool_result(tool_name, result)
                                 tool_result = json.dumps(compact, ensure_ascii=False)
@@ -1136,7 +1204,7 @@ class BaseTracer(ABC):
                                 except Exception:
                                     pass
                             except asyncio.TimeoutError:
-                                logger.error(f"❌ Tool timeout: {tool_name}")
+                                logger.error(f"❌ Tool timeout: {tool_name} (limit={_to}s)")
                                 tool_result = json.dumps({"error": "tool_timeout", "tool": tool_name})
                                 try:
                                     tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
@@ -1183,7 +1251,7 @@ class BaseTracer(ABC):
                                 pass
                         elif tool_name == "token_transfers":
                             self._collect_token_transfer_data(
-                                tool_result, arguments, all_txs_map, risk_map, 
+                                tool_result, arguments, all_txs_map, risk_map,
                                 txs_collected, tx_list_collected, txs_seen
                             )
 
@@ -1278,11 +1346,12 @@ class BaseTracer(ABC):
                 arguments["asset"] = self._normalize_chain(arguments.get("asset"))
             tool_input = json.dumps(arguments, ensure_ascii=False)
             tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
+            timeout = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
             with function_span(tool_name, input=tool_input) as tool_span:
                 try:
                     result = await asyncio.wait_for(
                         self.execute_tool(tool_name, arguments),
-                        timeout=TOOL_TIMEOUT
+                        timeout=timeout
                     )
                     try:
                         if hasattr(tool_span, "span_data"):
@@ -1291,7 +1360,7 @@ class BaseTracer(ABC):
                         pass
                     return result
                 except asyncio.TimeoutError:
-                    logger.error(f"❌ Tool timeout: {tool_name}")
+                    logger.error(f"❌ Tool timeout: {tool_name} (limit={timeout}s)")
                     try:
                         tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
                         tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
@@ -1318,6 +1387,7 @@ class BaseTracer(ABC):
                     "perpetrator": 4,
                     "bridge_service": 4,
                     "cex_deposit": 4,
+                    "dex_service": 4,
                     "otc_service": 4,
                     "unidentified_service": 4,
                     "cluster": 3,
@@ -1513,6 +1583,66 @@ class BaseTracer(ABC):
                 "blockchain_name": chain
             })
             transfer = self._parse_transfer(transfer_result, token_id=token_id_hint)
+
+            # Fallback for native transfers (ETH/TRX/BTC): token_transfers returns
+            # nothing, so use get_transaction with the known victim_address.
+            if not transfer or not transfer.get("from") or not transfer.get("to"):
+                if victim_address:
+                    logger.info("token_transfers empty for seed tx; falling back to get_transaction (native transfer)")
+                    tx_result = await _call_tool("get_transaction", {
+                        "address": victim_address,
+                        "tx_hash": tx_hash,
+                        "blockchain_name": chain,
+                        "token_id": 0,
+                        "path": "0",
+                    })
+                    tx_data = tx_result.get("data", {}) if isinstance(tx_result, dict) else {}
+                    if isinstance(tx_data, list) and tx_data:
+                        tx_data = tx_data[0]
+                    if isinstance(tx_data, dict) and tx_data:
+                        inp = tx_data.get("input") or tx_data.get("inputs")
+                        out = tx_data.get("output") or tx_data.get("outputs")
+                        # Handle both account-model (dict) and UTXO-model (list)
+                        from_addr_fb = None
+                        to_addr_fb = None
+                        inp_riskscore = None
+                        out_riskscore = None
+                        out_owner = None
+
+                        if isinstance(inp, dict):
+                            from_addr_fb = inp.get("address")
+                            inp_riskscore = inp.get("riskscore")
+                        elif isinstance(inp, list) and inp:
+                            first_inp = inp[0] if isinstance(inp[0], dict) else {}
+                            from_addr_fb = first_inp.get("address")
+                            inp_riskscore = first_inp.get("riskscore")
+
+                        if isinstance(out, dict):
+                            to_addr_fb = out.get("address")
+                            out_riskscore = out.get("riskscore")
+                            out_owner = out.get("owner")
+                        elif isinstance(out, list) and out:
+                            first_out = out[0] if isinstance(out[0], dict) else {}
+                            to_addr_fb = first_out.get("address")
+                            out_riskscore = first_out.get("riskscore")
+                            out_owner = first_out.get("owner")
+
+                        if not from_addr_fb:
+                            from_addr_fb = tx_data.get("from") or tx_data.get("sender")
+                        if not to_addr_fb:
+                            to_addr_fb = tx_data.get("to") or tx_data.get("recipient")
+
+                        transfer = {
+                            "from": from_addr_fb,
+                            "to": to_addr_fb,
+                            "amount": tx_data.get("amount", 0.0),
+                            "block_time": tx_data.get("block_time"),
+                            "token_id": tx_data.get("token_id", 0),
+                            "output_owner": out_owner,
+                            "input_riskscore": inp_riskscore,
+                            "output_riskscore": out_riskscore,
+                        }
+
             if not transfer or not transfer.get("from") or not transfer.get("to"):
                 raise RuntimeError("Unable to extract theft transfer details from tx_hash")
 
@@ -1736,20 +1866,43 @@ class BaseTracer(ABC):
                 paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
                 processed_paths += 1
                 continue
+
+            dust_threshold = fifo_ledger.stolen_amount * 0.001 if fifo_ledger.stolen_amount > 0 else 0
+            if dust_threshold > 0 and job.attributed_amount < dust_threshold:
+                fifo_ledger.claim_terminal(job.attributed_amount)
+                if paths[job.path_id]["stop_reason"] is None:
+                    paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of stolen value"
+                processed_paths += 1
+                continue
+
             path_seen_addresses.setdefault(job.path_id, set()).add(job.current_address)
 
             if on_progress:
                 await on_progress(f"Analyzing hop {job.hop_index + 1}...")
 
-            # Classify current address
-            get_addr_result = await _call_tool("get_address", {
-                "blockchain_name": job.chain,
-                "address": job.current_address,
-            })
-            get_extra_result = await _call_tool("get_extra_address_info", {
-                "address": job.current_address,
-                "asset": job.asset,
-            })
+            # Phase 1: parallel address info + speculative bridge probe for early hops
+            _coros: list = [
+                _call_tool("get_address", {
+                    "blockchain_name": job.chain,
+                    "address": job.current_address,
+                }),
+                _call_tool("get_extra_address_info", {
+                    "address": job.current_address,
+                    "asset": job.asset,
+                }),
+            ]
+            _early_bridge = bool(job.incoming_tx_hash and job.hop_index <= 3)
+            if _early_bridge:
+                _coros.append(_call_tool("bridge_analyze", {
+                    "chain": job.chain,
+                    "tx_hash": job.incoming_tx_hash,
+                }))
+
+            _phase1 = await asyncio.gather(*_coros)
+            get_addr_result = _phase1[0]
+            get_extra_result = _phase1[1]
+            _early_bridge_result = _phase1[2] if _early_bridge else None
+
             risk_score = self._extract_risk_score(get_addr_result)
             risk_map[job.current_address] = risk_score
 
@@ -1825,14 +1978,151 @@ class BaseTracer(ABC):
                     "text": f"Passed through high-risk address (score: {risk_score:.2f})",
                 })
 
-            # --- OTC-like behavioral analysis ---
-            cex_threshold = payload.get("cex_single_cluster_threshold", 0.60)
-            if role in ("otc_service", "intermediate", "unidentified_service") and not terminal:
-                try:
-                    deposit_txs = await _fetch_outgoing_txs(
-                        job.current_address, job.chain, None, job.token_id, max_pages=2, page_limit=50,
+            # OTC-like analysis flag — deferred until after outgoing-tx fetch to reuse data
+            _run_otc = (
+                not terminal
+                and role in ("otc_service", "unidentified_service")
+            )
+
+            # Bridge detection & continuation
+            bridge_info = None
+            if job.incoming_tx_hash:
+                service_label = classification.get("service_label") or heuristic.get("service_label") or ""
+                bridge_candidate = (
+                    role == "bridge_service"
+                    or heuristic.get("role") == "bridge_service"
+                    or ("bridge" in str(service_label).lower())
+                )
+                if _early_bridge_result is not None:
+                    bridge_info = _parse_bridge_info(_early_bridge_result)
+                elif bridge_candidate:
+                    bridge_result = await _call_tool("bridge_analyze", {
+                        "chain": job.chain,
+                        "tx_hash": job.incoming_tx_hash,
+                    })
+                    bridge_info = _parse_bridge_info(bridge_result)
+
+            if bridge_info and bridge_info.get("is_bridge"):
+                dst_chain = bridge_info.get("dst_chain")
+                dst_address = bridge_info.get("dst_address")
+                dst_tx_hash = bridge_info.get("dst_tx_hash")
+                dst_block_time = bridge_info.get("dst_block_time")
+                amount_out = bridge_info.get("amount_out")
+
+                if dst_chain and dst_address:
+                    # Promote to bridge service if tool confirms with destination
+                    role = "bridge_service"
+                    terminal = True
+                    if "Bridge" not in labels:
+                        labels.append("Bridge")
+                    _ensure_entity(job.current_address, role, risk_score, labels=labels, notes=notes)
+
+                    dst_chain_norm = self._normalize_chain(dst_chain)
+                    bridge_amount = self._normalize_amount(
+                        amount_out if amount_out is not None else (job.incoming_amount or 0.0),
+                        dst_chain_norm,
+                        job.asset,
                     )
-                    withdraw_txs = deposit_txs  # already fetched (withdrawals)
+                    if amount_out is not None and job.incoming_amount:
+                        gap = abs(self._normalize_amount(amount_out, dst_chain_norm, job.asset) - float(job.incoming_amount or 0.0)) / max(float(job.incoming_amount or 1.0), 1.0)
+                        if gap > 0.2:
+                            annotations.append({
+                                "id": f"ann-{len(annotations)+1}",
+                                "label": "Bridge Aggregation",
+                                "related_addresses": [job.current_address, dst_address],
+                                "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                                "text": f"Bridge aggregation detected - output amount ({bridge_amount}) differs from input ({job.incoming_amount}).",
+                            })
+
+                    bridge_step_amount = float(bridge_amount or 0.0)
+                    bridge_raw_attr = fifo_ledger.attribute_outflow(job.current_address, bridge_step_amount)
+                    fifo_ledger.record_inflow(dst_address, bridge_step_amount, bridge_raw_attr)
+
+                    step_index = len(paths[job.path_id]["steps"])
+                    _add_step(job.path_id, {
+                        "step_index": step_index,
+                        "from": job.current_address,
+                        "to": dst_address,
+                        "tx_hash": dst_tx_hash,
+                        "chain": dst_chain_norm,
+                        "asset": job.asset,
+                        "amount_estimate": bridge_step_amount,
+                        "attributed_amount": bridge_raw_attr,
+                        "time": int(dst_block_time) if dst_block_time else job.incoming_time,
+                        "direction": "out",
+                        "step_type": "bridge_transfer",
+                        "service_label": classification.get("service_label") or heuristic.get("service_label") or "Bridge",
+                        "protocol": bridge_info.get("protocol") or classification.get("protocol"),
+                        "reasoning": "Bridge detected; continuing on destination chain.",
+                    })
+
+                    new_token_id = await _resolve_token_id_for_chain(
+                        dst_chain_norm,
+                        dst_address,
+                        job.asset,
+                        fallback=job.token_id,
+                    )
+
+                    hop_queue.append(HopJob(
+                        path_id=job.path_id,
+                        current_address=dst_address,
+                        incoming_tx_hash=dst_tx_hash or job.incoming_tx_hash,
+                        incoming_amount=bridge_step_amount,
+                        incoming_time=int(dst_block_time) if dst_block_time else job.incoming_time,
+                        chain=dst_chain_norm,
+                        asset=job.asset,
+                        token_id=int(new_token_id or job.token_id or 0),
+                        hop_index=job.hop_index + 1,
+                        attributed_amount=bridge_raw_attr,
+                    ))
+                    # Continue on destination chain
+                    continue
+
+                # If tool hints at bridge but no destination, annotate and fall through
+                # to outgoing-tx search instead of stopping immediately.
+                if role == "bridge_service" or heuristic.get("role") == "bridge_service":
+                    annotations.append({
+                        "id": f"ann-{len(annotations)+1}",
+                        "label": "Bridge - Destination Unknown",
+                        "related_addresses": [job.current_address],
+                        "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
+                        "text": "Bridge detected but destination chain/address unknown. Checking outgoing transactions.",
+                    })
+                    # Don't continue — fall through to outgoing tx search below
+
+            if terminal:
+                fifo_ledger.claim_terminal(job.attributed_amount)
+                paths[job.path_id]["stop_reason"] = stop_reason or "Reached terminal entity"
+                processed_paths += 1
+                continue
+
+            # Find next outgoing transactions (chronological accumulation)
+            data_list = await _fetch_outgoing_txs(
+                job.current_address,
+                job.chain,
+                job.incoming_time,
+                job.token_id,
+            )
+            # If no results with specific token, retry with native token (asset conversion on exchange)
+            if not data_list and job.token_id not in (None, 0):
+                logger.info("No outgoing txs for token_id=%s, retrying with native token", job.token_id)
+                data_list = await _fetch_outgoing_txs(
+                    job.current_address,
+                    job.chain,
+                    job.incoming_time,
+                    0,
+                )
+            if not data_list:
+                fifo_ledger.claim_terminal(job.attributed_amount)
+                paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
+                processed_paths += 1
+                continue
+
+            # --- OTC-like behavioral analysis (deferred, reuses data_list) ---
+            if _run_otc:
+                cex_threshold = payload.get("cex_single_cluster_threshold", 0.60)
+                try:
+                    withdraw_txs = data_list
                     in_txs_result = await _call_tool("all_txs", {
                         "address": job.current_address,
                         "blockchain_name": job.chain,
@@ -1919,125 +2209,6 @@ class BaseTracer(ABC):
                             })
                 except Exception as exc:
                     logger.warning(f"OTC-like analysis failed for {job.current_address}: {exc}")
-
-            # Bridge detection & continuation (probe early if needed)
-            bridge_info = None
-            if job.incoming_tx_hash:
-                service_label = classification.get("service_label") or heuristic.get("service_label") or ""
-                bridge_candidate = (
-                    role == "bridge_service"
-                    or heuristic.get("role") == "bridge_service"
-                    or ("bridge" in str(service_label).lower())
-                )
-                # Probe a few early hops even if metadata is missing
-                if bridge_candidate or job.hop_index <= 8:
-                    bridge_result = await _call_tool("bridge_analyze", {
-                        "chain": job.chain,
-                        "tx_hash": job.incoming_tx_hash,
-                    })
-                    bridge_info = _parse_bridge_info(bridge_result)
-
-            if bridge_info and bridge_info.get("is_bridge"):
-                dst_chain = bridge_info.get("dst_chain")
-                dst_address = bridge_info.get("dst_address")
-                dst_tx_hash = bridge_info.get("dst_tx_hash")
-                dst_block_time = bridge_info.get("dst_block_time")
-                amount_out = bridge_info.get("amount_out")
-
-                if dst_chain and dst_address:
-                    # Promote to bridge service if tool confirms with destination
-                    role = "bridge_service"
-                    terminal = True
-                    if "Bridge" not in labels:
-                        labels.append("Bridge")
-                    _ensure_entity(job.current_address, role, risk_score, labels=labels, notes=notes)
-
-                    dst_chain_norm = self._normalize_chain(dst_chain)
-                    bridge_amount = self._normalize_amount(
-                        amount_out if amount_out is not None else (job.incoming_amount or 0.0),
-                        dst_chain_norm,
-                        job.asset,
-                    )
-                    if amount_out is not None and job.incoming_amount:
-                        gap = abs(self._normalize_amount(amount_out, dst_chain_norm, job.asset) - float(job.incoming_amount or 0.0)) / max(float(job.incoming_amount or 1.0), 1.0)
-                        if gap > 0.2:
-                            annotations.append({
-                                "id": f"ann-{len(annotations)+1}",
-                                "label": "Bridge Aggregation",
-                                "related_addresses": [job.current_address, dst_address],
-                                "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
-                                "text": f"Bridge aggregation detected - output amount ({bridge_amount}) differs from input ({job.incoming_amount}).",
-                            })
-
-                    bridge_step_amount = float(bridge_amount or 0.0)
-                    bridge_raw_attr = fifo_ledger.attribute_outflow(job.current_address, bridge_step_amount)
-                    fifo_ledger.record_inflow(dst_address, bridge_step_amount, bridge_raw_attr)
-
-                    step_index = len(paths[job.path_id]["steps"])
-                    _add_step(job.path_id, {
-                        "step_index": step_index,
-                        "from": job.current_address,
-                        "to": dst_address,
-                        "tx_hash": dst_tx_hash,
-                        "chain": dst_chain_norm,
-                        "asset": job.asset,
-                        "amount_estimate": bridge_step_amount,
-                        "attributed_amount": bridge_raw_attr,
-                        "time": int(dst_block_time) if dst_block_time else job.incoming_time,
-                        "direction": "out",
-                        "step_type": "bridge_transfer",
-                        "service_label": classification.get("service_label") or heuristic.get("service_label") or "Bridge",
-                        "protocol": bridge_info.get("protocol") or classification.get("protocol"),
-                        "reasoning": "Bridge detected; continuing on destination chain.",
-                    })
-
-                    new_token_id = await _resolve_token_id_for_chain(
-                        dst_chain_norm,
-                        dst_address,
-                        job.asset,
-                        fallback=job.token_id,
-                    )
-
-                    hop_queue.append(HopJob(
-                        path_id=job.path_id,
-                        current_address=dst_address,
-                        incoming_tx_hash=dst_tx_hash or job.incoming_tx_hash,
-                        incoming_amount=bridge_step_amount,
-                        incoming_time=int(dst_block_time) if dst_block_time else job.incoming_time,
-                        chain=dst_chain_norm,
-                        asset=job.asset,
-                        token_id=int(new_token_id or job.token_id or 0),
-                        hop_index=job.hop_index + 1,
-                        attributed_amount=bridge_raw_attr,
-                    ))
-                    # Continue on destination chain
-                    continue
-
-                # If tool hints at bridge but no destination, only stop if metadata already says bridge.
-                if role == "bridge_service" or heuristic.get("role") == "bridge_service":
-                    fifo_ledger.claim_terminal(job.attributed_amount)
-                    paths[job.path_id]["stop_reason"] = "Reached bridge service - destination unknown"
-                    processed_paths += 1
-                    continue
-
-            if terminal:
-                fifo_ledger.claim_terminal(job.attributed_amount)
-                paths[job.path_id]["stop_reason"] = stop_reason or "Reached terminal entity"
-                processed_paths += 1
-                continue
-
-            # Find next outgoing transactions (chronological accumulation)
-            data_list = await _fetch_outgoing_txs(
-                job.current_address,
-                job.chain,
-                job.incoming_time,
-                job.token_id,
-            )
-            if not data_list:
-                fifo_ledger.claim_terminal(job.attributed_amount)
-                paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
-                processed_paths += 1
-                continue
 
             selector_result = None
             selected_hashes = self._accumulate_hashes(data_list, job.incoming_amount, job.chain)
@@ -2198,6 +2369,7 @@ class BaseTracer(ABC):
                 "terminated_reason": "All paths reached terminal entities or dead ends",
                 "total_traced_amount": fifo_ledger.total_traced if fifo_ledger.stolen_amount > 0 else None,
                 "stolen_amount": fifo_ledger.stolen_amount if fifo_ledger.stolen_amount > 0 else None,
+                "fifo_audit_log": fifo_ledger.audit_log,
             },
         }
 
@@ -2329,6 +2501,9 @@ class BaseTracer(ABC):
 
         if on_progress:
             await on_progress("Analyzing transaction context...")
+
+        # Normalize chain early so all downstream calls use the SAILS currency code.
+        config.blockchain_name = self._normalize_chain(config.blockchain_name)
 
         # Extract victim from tx_hash when possible
         token_id_hint: Optional[int] = None
@@ -2569,6 +2744,10 @@ class BaseTracer(ABC):
             if not currency:
                 continue
             currency = str(currency).lower()
+            # Skip testnet currencies — they share symbols with mainnets
+            # (e.g. btc_testnet has symbol "btc") and would overwrite them.
+            if "testnet" in currency:
+                continue
             mapping[currency] = currency
             symbol = item.get("symbol")
             if symbol:
@@ -2590,10 +2769,13 @@ class BaseTracer(ABC):
             "trx": "trx",
             "ethereum": "eth",
             "eth": "eth",
-            "binance": "bnb",
-            "bsc": "bnb",
-            "bnb": "bnb",
-            "bep20": "bnb",
+            "binance": "bsc",
+            "bsc": "bsc",
+            "bnb": "bsc",
+            "bep20": "bsc",
+            "poly": "matic",
+            "polygon": "matic",
+            "matic": "matic",
         }
         if c in manual:
             return manual[c]

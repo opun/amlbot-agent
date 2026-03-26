@@ -90,6 +90,20 @@ class TraceRequest(BaseModel):
 
 # In-memory session storage (use Redis in production)
 sessions: Dict[str, SessionState] = {}
+SESSION_MAX_COUNT = int(os.getenv("SESSION_MAX_COUNT", "1000"))
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))  # 1 hour
+
+
+def _cleanup_expired_sessions() -> int:
+    """Remove sessions older than SESSION_TTL_SECONDS. Returns count of removed sessions."""
+    now = datetime.now()
+    expired = [
+        sid for sid, s in sessions.items()
+        if (now - s.created_at).total_seconds() > SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        del sessions[sid]
+    return len(expired)
 
 
 def get_user_id_from_request(request: Request, body_user_id: Optional[str] = None) -> Optional[str]:
@@ -111,11 +125,22 @@ def get_user_id_from_request(request: Request, body_user_id: Optional[str] = Non
     return request.cookies.get("userId")
 
 
+async def _session_cleanup_loop():
+    """Periodically clean up expired sessions."""
+    while True:
+        await asyncio.sleep(300)  # Every 5 minutes
+        removed = _cleanup_expired_sessions()
+        if removed:
+            logger.info("Cleaned up %d expired sessions, %d remaining", removed, len(sessions))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting Crypto Tracer API...")
+    cleanup_task = asyncio.create_task(_session_cleanup_loop())
     yield
+    cleanup_task.cancel()
     logger.info("Shutting down Crypto Tracer API...")
 
 
@@ -132,11 +157,13 @@ app = FastAPI(
 OPENAPI_PATH = Path(__file__).resolve().parents[2] / "docs" / "openapi.yaml"
 
 # Enable CORS for frontend
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] if _cors_origins_env else ["http://localhost:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -167,6 +194,33 @@ async def redoc_ui():
     )
 
 
+# Pre-compiled regex patterns for fast_parse_input
+_RE_ETH_ADDRESS = re.compile(r'\b(0x[a-fA-F0-9]{40})\b')
+_RE_TRON_ADDRESS = re.compile(r'\b(T[a-zA-Z0-9]{33})\b')
+_RE_BTC_ADDRESS = re.compile(r'\b(bc1[a-zA-Z0-9]{39,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b')
+_RE_ETH_TX = re.compile(r'\b(0x[a-fA-F0-9]{64})\b')
+_RE_PLAIN_TX = re.compile(r'\b([a-fA-F0-9]{64})\b')
+# Solana tx hashes are base58-encoded, typically 87-88 chars (no 0, O, I, l)
+_RE_SOL_TX = re.compile(r'\b([1-9A-HJ-NP-Za-km-z]{80,90})\b')
+_RE_ETH_KW = re.compile(r'\b(ethereum|eth)\b', re.IGNORECASE)
+_RE_TRON_KW = re.compile(r'\b(tron|trx)\b', re.IGNORECASE)
+_RE_BTC_KW = re.compile(r'\b(bitcoin|btc)\b', re.IGNORECASE)
+_RE_POLY_KW = re.compile(r'\b(polygon|matic|poly)\b', re.IGNORECASE)
+_RE_BSC_KW = re.compile(r'\b(bsc|binance|bnb)\b', re.IGNORECASE)
+_RE_SOL_KW = re.compile(r'\b(solana|sol)\b', re.IGNORECASE)
+_RE_ARB_KW = re.compile(r'\b(arbitrum|arb)\b', re.IGNORECASE)
+_RE_OP_KW = re.compile(r'\b(optimism|op)\b', re.IGNORECASE)
+_RE_BASE_KW = re.compile(r'\b(base)\b', re.IGNORECASE)
+_RE_AVAX_KW = re.compile(r'\b(avalanche|avax)\b', re.IGNORECASE)
+_RE_BCH_KW = re.compile(r'\b(bitcoin\s*cash|bch)\b', re.IGNORECASE)
+_RE_LTC_KW = re.compile(r'\b(litecoin|ltc)\b', re.IGNORECASE)
+_RE_ETC_KW = re.compile(r'\b(ethereum\s*classic|etc)\b', re.IGNORECASE)
+_RE_ADA_KW = re.compile(r'\b(cardano|ada)\b', re.IGNORECASE)
+_RE_XRP_KW = re.compile(r'\b(ripple|xrp)\b', re.IGNORECASE)
+_RE_ASSET = re.compile(r'\b(USDT|USDC|ETH|BTC|TRX|BNB|MATIC|SOL|ADA|XRP|BCH|LTC|ETC)\b', re.IGNORECASE)
+_RE_DATE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
+
+
 def fast_parse_input(message: str) -> Dict[str, Any]:
     """
     Fast regex-based parsing for simple inputs like addresses and tx hashes.
@@ -175,67 +229,106 @@ def fast_parse_input(message: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
 
     # Ethereum address pattern (0x + 40 hex chars)
-    eth_address = re.search(r'\b(0x[a-fA-F0-9]{40})\b', message)
+    eth_address = _RE_ETH_ADDRESS.search(message)
     if eth_address:
         result["victim_address"] = eth_address.group(1)
         result["blockchain_name"] = "eth"
 
     # Tron address pattern (T + 33 chars)
-    tron_address = re.search(r'\b(T[a-zA-Z0-9]{33})\b', message)
+    tron_address = _RE_TRON_ADDRESS.search(message)
     if tron_address:
         result["victim_address"] = tron_address.group(1)
         result["blockchain_name"] = "trx"
 
     # Bitcoin address patterns
-    btc_address = re.search(r'\b(bc1[a-zA-Z0-9]{39,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b', message)
+    btc_address = _RE_BTC_ADDRESS.search(message)
     if btc_address:
         result["victim_address"] = btc_address.group(1)
         result["blockchain_name"] = "btc"
 
     # Ethereum tx hash (0x + 64 hex chars) - only set blockchain if explicitly ETH format
-    eth_tx = re.search(r'\b(0x[a-fA-F0-9]{64})\b', message)
+    eth_tx = _RE_ETH_TX.search(message)
     if eth_tx:
         result["tx_hash"] = eth_tx.group(1)
         # Only auto-set blockchain if message mentions ethereum/eth
-        if re.search(r'\b(ethereum|eth)\b', message, re.IGNORECASE):
+        # but NOT "ethereum classic" (which is ETC)
+        if _RE_ETH_KW.search(message) and not _RE_ETC_KW.search(message):
             result["blockchain_name"] = "eth"
 
     # Plain 64-char hex tx hash (could be Tron or other) - DON'T auto-detect blockchain
-    plain_tx = re.search(r'\b([a-fA-F0-9]{64})\b', message)
+    plain_tx = _RE_PLAIN_TX.search(message)
     if plain_tx and "tx_hash" not in result:
         result["tx_hash"] = plain_tx.group(1)
         # Only set blockchain if explicitly mentioned
-        if re.search(r'\b(tron|trx)\b', message, re.IGNORECASE):
+        if _RE_TRON_KW.search(message):
             result["blockchain_name"] = "trx"
         # Don't auto-assume blockchain for plain hashes
 
+    # Solana base58 tx hash (87-88 chars, no 0/O/I/l)
+    if "tx_hash" not in result:
+        sol_tx = _RE_SOL_TX.search(message)
+        if sol_tx:
+            result["tx_hash"] = sol_tx.group(1)
+            result["blockchain_name"] = "sol"
+
     # Detect blockchain from keywords
+    # Note: order matters — check more specific patterns before generic ones
+    # (e.g., "bitcoin cash" before "bitcoin", "ethereum classic" before "ethereum")
     if "blockchain_name" not in result:
-        if re.search(r'\b(ethereum|eth)\b', message, re.IGNORECASE):
+        if _RE_BCH_KW.search(message):
+            result["blockchain_name"] = "bch"
+        elif _RE_ETC_KW.search(message):
+            result["blockchain_name"] = "etc"
+        elif _RE_ETH_KW.search(message):
             result["blockchain_name"] = "eth"
-        elif re.search(r'\b(tron|trx)\b', message, re.IGNORECASE):
+        elif _RE_TRON_KW.search(message):
             result["blockchain_name"] = "trx"
-        elif re.search(r'\b(bitcoin|btc)\b', message, re.IGNORECASE):
+        elif _RE_BTC_KW.search(message):
             result["blockchain_name"] = "btc"
-        elif re.search(r'\b(polygon|matic|poly)\b', message, re.IGNORECASE):
+        elif _RE_POLY_KW.search(message):
             result["blockchain_name"] = "poly"
-        elif re.search(r'\b(bsc|binance)\b', message, re.IGNORECASE):
+        elif _RE_BSC_KW.search(message):
             result["blockchain_name"] = "bsc"
+        elif _RE_SOL_KW.search(message):
+            result["blockchain_name"] = "sol"
+        elif _RE_ARB_KW.search(message):
+            result["blockchain_name"] = "arb"
+        elif _RE_OP_KW.search(message):
+            result["blockchain_name"] = "op"
+        elif _RE_BASE_KW.search(message):
+            result["blockchain_name"] = "base"
+        elif _RE_AVAX_KW.search(message):
+            result["blockchain_name"] = "avax"
+        elif _RE_LTC_KW.search(message):
+            result["blockchain_name"] = "ltc"
+        elif _RE_ADA_KW.search(message):
+            result["blockchain_name"] = "ada"
+        elif _RE_XRP_KW.search(message):
+            result["blockchain_name"] = "xrp"
 
     # Detect asset from keywords
-    # Don't auto-set asset if it matches the blockchain name (ambiguous - user might mean blockchain, not asset)
-    asset_match = re.search(r'\b(USDT|USDC|ETH|BTC|TRX|BNB|MATIC)\b', message, re.IGNORECASE)
+    # When the message is a short direct answer (≤10 chars), the user is likely answering
+    # "what asset was stolen?" — accept the asset even if it matches the blockchain name.
+    # For longer messages, suppress ambiguous matches (e.g., "trx" could mean blockchain).
+    # Prefer asset mentioned near "stolen"/"asset" context over first occurrence.
+    _NATIVE_TOKEN_TO_CHAIN = {"ETH": "ETH", "BNB": "BSC", "TRX": "TRX", "MATIC": "POLY", "SOL": "SOL", "ADA": "ADA", "XRP": "XRP", "BTC": "BTC", "BCH": "BCH", "LTC": "LTC", "ETC": "ETC"}
+    _asset_context_re = re.compile(r'(?:stolen|asset|token)[:\s]+(' + '|'.join(_RE_ASSET.pattern.split('(')[1].split(')')[0].split('|')) + r')', re.IGNORECASE)
+    asset_context_match = _asset_context_re.search(message)
+    asset_match = asset_context_match or _RE_ASSET.search(message)
     if asset_match:
         detected_asset = asset_match.group(1).upper()
         blockchain = result.get("blockchain_name", "").upper()
-        # Only set asset if it's different from blockchain (e.g., USDT on TRX, not TRX on TRX)
-        # This avoids ambiguity when user types "trx" meaning blockchain, not asset
-        if detected_asset != blockchain:
+        is_short_response = len(message.strip()) <= 10
+        has_explicit_context = asset_context_match is not None
+        # Check ambiguity: BNB is the native token for BSC, ETH for ETH, etc.
+        # If the asset was explicitly mentioned near "stolen"/"asset", always accept it.
+        is_native_token = _NATIVE_TOKEN_TO_CHAIN.get(detected_asset, "").upper() == blockchain
+        if has_explicit_context or is_short_response or (detected_asset != blockchain and not is_native_token):
             result["asset_symbol"] = detected_asset
             result["theft_asset"] = detected_asset
 
     # Detect date patterns
-    date_match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', message)
+    date_match = _RE_DATE.search(message)
     if date_match:
         result["approx_date"] = date_match.group(1)
 
@@ -246,6 +339,15 @@ def get_or_create_session(session_id: Optional[str]) -> SessionState:
     """Get existing session or create a new one."""
     if session_id and session_id in sessions:
         return sessions[session_id]
+
+    # Enforce session limits
+    if len(sessions) >= SESSION_MAX_COUNT:
+        removed = _cleanup_expired_sessions()
+        if removed == 0 and len(sessions) >= SESSION_MAX_COUNT:
+            # Evict oldest session
+            oldest_id = min(sessions, key=lambda sid: sessions[sid].created_at)
+            del sessions[oldest_id]
+            logger.warning("Evicted oldest session %s due to max session limit", oldest_id)
 
     new_id = session_id or str(uuid.uuid4())
     session = SessionState(session_id=new_id)
@@ -530,9 +632,10 @@ async def _run_trace_http(
         }) + "\n"
 
     finally:
-        await http_client.aclose()
+        close_tasks = [http_client.aclose()]
         if viz_client:
-            await viz_client.aclose()
+            close_tasks.append(viz_client.aclose())
+        await asyncio.gather(*close_tasks, return_exceptions=True)
 
 
 async def _run_trace_stdio(
@@ -874,6 +977,26 @@ async def chat(request: ChatRequest, http_request: Request):
             "collected_info": session.collected_info
         }
 
+    # Auto-reset session when user provides new case data after a completed trace.
+    # This lets users start a new trace without typing "reset" or reloading.
+    if session.step in ("trace_complete", "awaiting_continuation") and not is_confirmation:
+        # Check if the message looks like a new case (has an address, tx hash, or long description)
+        _has_new_data = (
+            _RE_ETH_TX.search(message)
+            or _RE_ETH_ADDRESS.search(message)
+            or _RE_TRON_ADDRESS.search(message)
+            or _RE_BTC_ADDRESS.search(message)
+            or _RE_PLAIN_TX.search(message)
+            or _RE_SOL_TX.search(message)
+            or len(message.strip()) > 30
+        )
+        if _has_new_data:
+            logger.info(f"New case data detected after {session.step} — auto-resetting session")
+            session.collected_info = {}
+            session.step = "initial"
+            session.last_trace_result = None
+            session.continuation_options = []
+
     # Handle continuation from previous trace
     if session.step == "awaiting_continuation":
         # Check if user wants to continue from a specific address
@@ -1010,7 +1133,22 @@ async def chat(request: ChatRequest, http_request: Request):
     else:
         logger.info(f"Fast parsed info: {parsed_info}")
 
-    # Merge new info with existing (new values override)
+    # Context-aware merge: use what's currently missing to resolve ambiguity.
+    # Short responses like "eth" or "trx" match both blockchain and asset — only set
+    # the field the user is most likely answering (the one that's currently missing).
+    pre_missing = get_missing_required_fields(session.collected_info)
+    chain_is_missing = any("blockchain" in m for m in pre_missing)
+    asset_is_missing = any("theft_asset" in m for m in pre_missing)
+
+    parsed_chain = parsed_info.get("blockchain_name", "")
+    parsed_asset = (parsed_info.get("theft_asset") or "")
+    is_ambiguous_pair = (
+        len(message.strip()) <= 10
+        and parsed_chain
+        and parsed_asset
+        and parsed_chain.upper() == parsed_asset.upper()
+    )
+
     for key, value in parsed_info.items():
         if value is not None:
             # Special handling for lists
@@ -1020,6 +1158,14 @@ async def chat(request: ChatRequest, http_request: Request):
                     session.collected_info[key] = list(set(existing + value))
                 elif value:
                     session.collected_info[key] = list(set(existing + [value]))
+            elif is_ambiguous_pair and key in ("theft_asset", "asset_symbol") and chain_is_missing:
+                # User typed "trx" — blockchain is missing, so they're answering that.
+                # Don't also auto-set asset; ask explicitly.
+                continue
+            elif is_ambiguous_pair and key == "blockchain_name" and not chain_is_missing:
+                # User typed "ETH" — blockchain already set, they're answering asset question.
+                # Don't overwrite the existing blockchain.
+                continue
             else:
                 session.collected_info[key] = value
 

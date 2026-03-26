@@ -25,7 +25,7 @@ def _coerce_float(value) -> float:
             return float(value)
         if isinstance(value, str):
             return float(value.replace(",", ""))
-    except Exception:
+    except (ValueError, TypeError):
         return 0.0
     return 0.0
 
@@ -39,12 +39,12 @@ def _coerce_time(value):
         # Try numeric strings
         try:
             return int(float(value))
-        except Exception:
+        except (ValueError, OverflowError):
             pass
         # Try ISO date strings
         try:
             return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
-        except Exception:
+        except (ValueError, TypeError):
             return value
     return value
 

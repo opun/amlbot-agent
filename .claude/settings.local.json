@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"^\\\\-.*\\\\.\\(py|json|yaml|yml|toml|ini|sh|txt|cfg\\)$|^d\")",
+      "Bash(wc -l /Users/opun/GitHub/AMLBot/amlbot-agent/src/agent/*.py)",
+      "Bash(grep -r \"SECRET\\\\|PASSWORD\\\\|TOKEN\\\\|KEY\" /Users/opun/GitHub/AMLBot/amlbot-agent --include=*.env* --include=*.js --include=*.ts --include=*.tsx --include=*.py)",
+      "Bash(python3 -m py_compile /Users/opun/GitHub/AMLBot/amlbot-agent/src/agent/*.py)",
+      "Bash(git check-ignore:*)",
+      "Bash(find /Users/opun/GitHub/AMLBot/amlbot-agent -name *.test.ts -o -name *.spec.ts -o -name *.test.js -o -name *.spec.js)",
+      "Bash(npm outdated:*)",
+      "Bash(grep -r \"class\\\\|def \" /Users/opun/GitHub/AMLBot/amlbot-agent/src/agent/*.py)",
+      "Bash(git -C /Users/opun/GitHub/AMLBot/amlbot-agent config --local user.name)",
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\" /Users/opun/GitHub/AMLBot/amlbot-agent/src/agent/*.py)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(find /Users/opun/GitHub/AMLBot/amlbot-agent/docs -name \"*.md\" -exec wc -l {} +)",
+      "Bash(python:*)",
+      "Bash(uv run:*)",
+      "Bash(uv pip:*)",
+      "Bash(find /Users/opun/GitHub/AMLBot/amlbot-agent/src/agent/prompts -name *.md -type f)",
+      "Bash(ls /Users/opun/GitHub/AMLBot/amlbot-agent/docker-compose*.yml)",
+      "Bash(curl -s http://localhost:8000/api/health)",
+      "Bash(pkill -f \"uvicorn agent.api\")",
+      "Bash(git log:*)"
+    ]
+  }
+}

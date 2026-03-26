@@ -1,19 +1,21 @@
-import re
 import json
 import logging
+import re
 from datetime import datetime
-from typing import List, Optional, Tuple, Dict, Any, Union
-from agent.models import TracerConfig
-from agent.mcp_client import MCPClient
-from agent.mcp_http_client import MCPHTTPClient
+from typing import Any
+
 from agents import Agent, Runner, function_span
 
+from agent.mcp_client import MCPClient
+from agent.mcp_http_client import MCPHTTPClient
+from agent.models import TracerConfig
+
 # Type alias for client
-AnyMCPClient = Union[MCPClient, MCPHTTPClient]
+AnyMCPClient = MCPClient | MCPHTTPClient
 
 logger = logging.getLogger("theft_detection")
 
-def infer_approx_date_from_description(description: str) -> Optional[str]:
+def infer_approx_date_from_description(description: str) -> str | None:
     """
     Extract approximate date from description using regex.
     Returns YYYY-MM-DD string or None.
@@ -69,7 +71,7 @@ def infer_approx_date_from_description(description: str) -> Optional[str]:
 
     return None
 
-async def parse_case_description_with_llm(description: str) -> Dict[str, Any]:
+async def parse_case_description_with_llm(description: str) -> dict[str, Any]:
     """
     Use OpenAI to parse case description and extract all required information.
     Returns a dictionary with extracted fields:
@@ -209,7 +211,7 @@ _EVM_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _EVM_CHAINS = {"eth", "bsc", "matic", "arb", "op", "base", "avax", "etc"}
 
 
-def _extract_address_from_expert_search(result: Any) -> Optional[str]:
+def _extract_address_from_expert_search(result: Any) -> str | None:
     """Try to extract a usable address from an expert_search response."""
     if not isinstance(result, dict):
         return None
@@ -242,7 +244,7 @@ def _extract_address_from_expert_search(result: Any) -> Optional[str]:
 
 def _parse_get_transaction_result(
     result: Any, tx_hash: str, blockchain_name: str
-) -> Tuple[str, int, Optional[str], Optional[int]]:
+) -> tuple[str, int, str | None, int | None]:
     """Parse get_transaction result into (victim_address, token_id, asset_symbol, block_time).
 
     Handles both account-model chains (ETH — single input/output) and
@@ -264,7 +266,6 @@ def _parse_get_transaction_result(
     logger.debug(f"get_transaction response keys: {list(data.keys())}")
 
     victim_address = None
-    recipient_address = None
 
     # Account-model: input/output are dicts with .address
     input_data = data.get("input") or data.get("inputs")
@@ -279,11 +280,11 @@ def _parse_get_transaction_result(
             victim_address = first_input.get("address")
 
     if isinstance(output_data, dict):
-        recipient_address = output_data.get("address")
+        output_data.get("address")
     elif isinstance(output_data, list) and output_data:
         first_output = output_data[0]
         if isinstance(first_output, dict):
-            recipient_address = first_output.get("address")
+            first_output.get("address")
 
     # Fallback to top-level fields
     if not victim_address:
@@ -310,7 +311,7 @@ async def extract_victim_from_tx_hash(
     tx_hash: str,
     blockchain_name: str,
     client: AnyMCPClient
-) -> Tuple[str, int, Optional[str], Optional[int]]:
+) -> tuple[str, int, str | None, int | None]:
     """
     Extract victim address from a transaction hash.
     Tries token-transfers first (ERC-20), then falls back to
@@ -427,9 +428,9 @@ async def extract_victim_from_tx_hash(
 
     except Exception as e:
         logger.error(f"Error extracting victim from tx_hash {tx_hash}: {e}")
-        raise ValueError(f"Failed to extract victim from transaction {tx_hash}: {e}")
+        raise ValueError(f"Failed to extract victim from transaction {tx_hash}: {e}") from e
 
-async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> Tuple[str, int]:
+async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> tuple[str, int]:
     """
     Detect asset symbol and token_id.
     If provided in config, verify it exists.

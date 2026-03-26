@@ -2,10 +2,11 @@
 HTTP client for MCP Server AMLBot.
 Replaces stdio-based MCP client with HTTP-based one.
 """
-import httpx
-import os
-from typing import Any, Dict, Optional
 import logging
+import os
+from typing import Any
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 class VisualizationAPIClient:
     """Client for the visualization API (save and share)."""
 
-    def __init__(self, api_url: Optional[str] = None, user_id: Optional[str] = None):
+    def __init__(self, api_url: str | None = None, user_id: str | None = None):
         """
         Initialize visualization API client.
 
@@ -25,7 +26,7 @@ class VisualizationAPIClient:
         self.user_id = user_id
         self.client = httpx.AsyncClient(timeout=60.0)
 
-    async def save_visualization(self, visualization_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def save_visualization(self, visualization_data: dict[str, Any]) -> dict[str, Any]:
         """
         Save visualization and get its ID.
 
@@ -60,7 +61,7 @@ class VisualizationAPIClient:
 
         return result
 
-    async def create_share_link(self, visualization_id: str) -> Dict[str, Any]:
+    async def create_share_link(self, visualization_id: str) -> dict[str, Any]:
         """
         Create a shareable link for a visualization.
 
@@ -94,7 +95,7 @@ class VisualizationAPIClient:
 
         return result
 
-    async def save_and_share(self, visualization_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def save_and_share(self, visualization_data: dict[str, Any]) -> dict[str, Any]:
         """
         Save visualization and immediately create a share link.
 
@@ -145,7 +146,7 @@ class MCPHTTPClient:
         self.user_id = user_id
         self.client = httpx.AsyncClient(timeout=60.0)
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool via HTTP."""
         url = f"{self.mcp_server_url}/api/tools/call"
 
@@ -172,11 +173,11 @@ class MCPHTTPClient:
 
     async def all_txs(
         self, address: str, blockchain_name: str,
-        filter_criteria: Optional[Dict] = None,
+        filter_criteria: dict | None = None,
         limit: int = 100, offset: int = 0,
         direction: str = "asc", order: str = "time",
         transaction_type: str = "all"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get all transactions for an address."""
         return await self.call_tool("all-txs", {
             "address": address,
@@ -192,7 +193,7 @@ class MCPHTTPClient:
     async def get_transaction(
         self, address: str, tx_hash: str,
         blockchain_name: str, token_id: int = 0, path: str = "0"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get transaction details."""
         return await self.call_tool("get-transaction", {
             "address": address,
@@ -202,42 +203,42 @@ class MCPHTTPClient:
             "path": path
         })
 
-    async def get_address(self, blockchain_name: str, address: str) -> Dict[str, Any]:
+    async def get_address(self, blockchain_name: str, address: str) -> dict[str, Any]:
         """Get address information."""
         return await self.call_tool("get-address", {
             "blockchain_name": blockchain_name,
             "address": address
         })
 
-    async def token_stats(self, blockchain_name: str, address: str) -> Dict[str, Any]:
+    async def token_stats(self, blockchain_name: str, address: str) -> dict[str, Any]:
         """Get token statistics."""
         return await self.call_tool("token-stats", {
             "blockchain_name": blockchain_name,
             "address": address
         })
 
-    async def get_extra_address_info(self, address: str, asset: str) -> Dict[str, Any]:
+    async def get_extra_address_info(self, address: str, asset: str) -> dict[str, Any]:
         """Get extra address information including service platform detection."""
         return await self.call_tool("get-extra-address-info", {
             "address": address,
             "asset": asset
         })
 
-    async def bridge_analyze(self, chain: str, tx_hash: str) -> Dict[str, Any]:
+    async def bridge_analyze(self, chain: str, tx_hash: str) -> dict[str, Any]:
         """Analyze bridge transaction."""
         return await self.call_tool("bridge-analyze", {
             "chain": chain,
             "tx_hash": tx_hash
         })
 
-    async def expert_search(self, hash: str, filter: str = "explorer") -> Dict[str, Any]:
+    async def expert_search(self, hash: str, filter: str = "explorer") -> dict[str, Any]:
         """Expert search."""
         return await self.call_tool("expert-search", {
             "hash": hash,
             "filter": filter
         })
 
-    async def token_transfers(self, tx_hash: str, blockchain_name: str) -> Dict[str, Any]:
+    async def token_transfers(self, tx_hash: str, blockchain_name: str) -> dict[str, Any]:
         """Get token transfers."""
         return await self.call_tool("token-transfers", {
             "tx_hash": tx_hash,
@@ -247,7 +248,7 @@ class MCPHTTPClient:
     async def get_position(
         self, address: str, tx_hash: str,
         blockchain_name: str, token_id: int = 0, path: str = "0"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get position information for transaction tracing."""
         return await self.call_tool("get-position", {
             "address": address,
@@ -257,11 +258,11 @@ class MCPHTTPClient:
             "path": path
         })
 
-    async def bridge_analyzer(self, chain: str, tx_hash: str) -> Dict[str, Any]:
+    async def bridge_analyzer(self, chain: str, tx_hash: str) -> dict[str, Any]:
         """Alias for bridge_analyze for compatibility."""
         return await self.bridge_analyze(chain, tx_hash)
 
-    async def save_and_share_visualization(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def save_and_share_visualization(self, data: dict[str, Any]) -> dict[str, Any]:
         """Save and share visualization."""
         return await self.call_tool("save-visualization", data)
 

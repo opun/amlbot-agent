@@ -2,36 +2,38 @@
 Base Tracer with shared orchestration logic.
 Interface implementations: MCPTracer (local stdio), HTTPTracer (remote HTTP).
 """
-import json
-import uuid
-import os
-import logging
 import asyncio
+import json
+import logging
+import os
 import time
+import uuid
 from abc import ABC, abstractmethod
-from pathlib import Path
-from functools import lru_cache
-from datetime import datetime
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError
-from agents import generation_span, function_span
-from httpx import Timeout, Limits
+from typing import Any
 
+from agents import function_span, generation_span
+from httpx import Limits, Timeout
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
+
+from .config import ModelConfig
 from .models import (
+    CaseMeta,
     TracerConfig,
     TraceResult,
-    CaseMeta,
 )
 from .theft_detection import (
-    infer_asset_symbol,
-    infer_approx_date_from_description,
     extract_victim_from_tx_hash,
+    infer_approx_date_from_description,
+    infer_asset_symbol,
 )
 from .trace_postprocess import postprocess_trace_result
 from .visualization import generate_visualization_payload
-from .config import ModelConfig
 
 logger = logging.getLogger("tracer")
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
@@ -55,9 +57,9 @@ MAX_TOKEN_TRANSFERS_PER_TURN = 2
 class HopJob:
     path_id: str
     current_address: str
-    incoming_tx_hash: Optional[str]
+    incoming_tx_hash: str | None
     incoming_amount: float
-    incoming_time: Optional[int]
+    incoming_time: int | None
     chain: str
     asset: str
     token_id: int
@@ -80,11 +82,11 @@ class FIFOLedger:
         self.tolerance = tolerance
         self.cap = stolen_amount * (1.0 + tolerance) if stolen_amount > 0 else float("inf")
         self.total_traced: float = 0.0
-        self._queues: Dict[str, List[Dict[str, float]]] = {}
-        self._audit_log: List[Dict[str, Any]] = []
+        self._queues: dict[str, list[dict[str, float]]] = {}
+        self._audit_log: list[dict[str, Any]] = []
 
     @property
-    def audit_log(self) -> List[Dict[str, Any]]:
+    def audit_log(self) -> list[dict[str, Any]]:
         return self._audit_log
 
     def record_inflow(self, address: str, amount: float, theft_share: float):
@@ -353,13 +355,13 @@ class BaseTracer(ABC):
         self.hop_classifier_prompt_path = Path(__file__).parent / "prompts" / "trace_hop_classifier.md"
 
         # Result storage for post-trace access
-        self.last_txs: List[Dict[str, Any]] = []
-        self.last_tx_list: List[Dict[str, Any]] = []
+        self.last_txs: list[dict[str, Any]] = []
+        self.last_tx_list: list[dict[str, Any]] = []
 
     # ─── Abstract methods (implemented by subclasses) ─────────────────────────
 
     @abstractmethod
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool call. Subclasses implement the transport (HTTP, MCP, etc)."""
         pass
 
@@ -407,7 +409,7 @@ class BaseTracer(ABC):
             return f"{tx_hash[:10]}...{tx_hash[-6:]}"
         return tx_hash
 
-    def _coerce_message_dict(self, msg: Any) -> Dict[str, Any]:
+    def _coerce_message_dict(self, msg: Any) -> dict[str, Any]:
         if isinstance(msg, dict):
             return msg
         if hasattr(msg, "model_dump"):
@@ -423,10 +425,10 @@ class BaseTracer(ABC):
             content = str(msg)
         return {"role": role, "content": content}
 
-    def _serialize_messages(self, messages: List[Any]) -> List[Dict[str, Any]]:
+    def _serialize_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
         return [self._coerce_message_dict(m) for m in messages]
 
-    def _normalize_usage(self, usage_obj: Any) -> Optional[Dict[str, Any]]:
+    def _normalize_usage(self, usage_obj: Any) -> dict[str, Any] | None:
         input_tokens = 0
         output_tokens = 0
         if usage_obj is not None:
@@ -439,8 +441,8 @@ class BaseTracer(ABC):
             "output_tokens": int(output_tokens or 0),
         }
 
-    def _flatten_strings(self, value: Any, limit: int = 200) -> List[str]:
-        items: List[str] = []
+    def _flatten_strings(self, value: Any, limit: int = 200) -> list[str]:
+        items: list[str] = []
 
         def _walk(obj: Any):
             if len(items) >= limit:
@@ -474,9 +476,9 @@ class BaseTracer(ABC):
     def _parse_transfer(
         self,
         result: Any,
-        expected_from: Optional[str] = None,
-        token_id: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
+        expected_from: str | None = None,
+        token_id: int | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(result, dict):
             return None
         transfers = result.get("data", [])
@@ -531,7 +533,7 @@ class BaseTracer(ABC):
             "output_riskscore": (transfer.get("output") or {}).get("riskscore") if isinstance(transfer.get("output"), dict) else None,
         }
 
-    def _parse_date_to_ts(self, date_str: Optional[str]) -> Optional[int]:
+    def _parse_date_to_ts(self, date_str: str | None) -> int | None:
         if not date_str:
             return None
         try:
@@ -547,7 +549,7 @@ class BaseTracer(ABC):
 
     _SATOSHI_CHAINS = {"btc", "bch", "ltc"}
 
-    def _normalize_amount(self, amount: Any, chain: str, asset: Optional[str] = None) -> float:
+    def _normalize_amount(self, amount: Any, chain: str, asset: str | None = None) -> float:
         try:
             val = float(amount)
         except (TypeError, ValueError):
@@ -572,11 +574,11 @@ class BaseTracer(ABC):
 
     def _resolve_amount(
         self,
-        tx_hash: Optional[str],
+        tx_hash: str | None,
         amount: Any,
         chain: str,
-        all_txs_map: Dict[str, Dict[str, Any]],
-        asset: Optional[str] = None,
+        all_txs_map: dict[str, dict[str, Any]],
+        asset: str | None = None,
     ) -> float:
         if tx_hash and tx_hash in all_txs_map:
             amt = all_txs_map[tx_hash].get("amount_coerced")
@@ -594,7 +596,7 @@ class BaseTracer(ABC):
         services.use_platform[] from get_extra_address_info;
         owner_hint.name, owner_hint.slug from token_transfers.
         """
-        parts: List[str] = []
+        parts: list[str] = []
 
         for obj in (owner, owner_hint):
             if isinstance(obj, dict):
@@ -610,10 +612,10 @@ class BaseTracer(ABC):
 
         return " ".join(parts).lower()
 
-    def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> Dict[str, Any]:
+    def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> dict[str, Any]:
         combined = self._extract_identity_texts(owner, services, owner_hint)
 
-        def _has_any(text: str, keywords: List[str]) -> bool:
+        def _has_any(text: str, keywords: list[str]) -> bool:
             return any(k in text for k in keywords)
 
         mixer_keywords = ["mixer", "tornado", "blender", "sinbad"]
@@ -648,8 +650,8 @@ class BaseTracer(ABC):
         tx_count: int,
         counterparty_count: int,
         address_age_days: int,
-        outbound_distribution: Dict[str, float],
-    ) -> Dict[str, Any]:
+        outbound_distribution: dict[str, float],
+    ) -> dict[str, Any]:
         """
         Behavioral classification: detect OTC-like / Potential Service entities
         based on activity metrics. Returns classification dict (never terminal).
@@ -701,7 +703,7 @@ class BaseTracer(ABC):
             )
         return tool_call
 
-    def _tool_call_to_dict(self, tool_call: Any) -> Dict[str, Any]:
+    def _tool_call_to_dict(self, tool_call: Any) -> dict[str, Any]:
         if isinstance(tool_call, dict):
             fn = tool_call.get("function") or {}
             args = fn.get("arguments") if isinstance(fn, dict) else None
@@ -729,9 +731,9 @@ class BaseTracer(ABC):
             },
         }
 
-    def _extract_tool_calls(self, choice: Any, message: Any, finish_reason: str) -> List[Any]:
-        tool_calls: List[Any] = []
-        choice_dump: Optional[Dict[str, Any]] = None
+    def _extract_tool_calls(self, choice: Any, message: Any, finish_reason: str) -> list[Any]:
+        tool_calls: list[Any] = []
+        choice_dump: dict[str, Any] | None = None
 
         try:
             raw_calls = getattr(message, "tool_calls", None)
@@ -787,10 +789,10 @@ class BaseTracer(ABC):
 
         return normalized
 
-    def _max_tokens_arg(self, model: str, max_tokens: int) -> Dict[str, int]:
+    def _max_tokens_arg(self, model: str, max_tokens: int) -> dict[str, int]:
         return {}
 
-    def _summarize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _summarize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return {"entities": 0, "paths": 0, "txs": 0}
         entities = payload.get("entities")
@@ -802,7 +804,7 @@ class BaseTracer(ABC):
             "txs": len(txs) if isinstance(txs, list) else 0,
         }
 
-    def _trim_messages(self, messages: List[Dict[str, Any]], max_messages: int = 12) -> List[Dict[str, Any]]:
+    def _trim_messages(self, messages: list[dict[str, Any]], max_messages: int = 12) -> list[dict[str, Any]]:
         if len(messages) <= max_messages:
             return messages
         if len(messages) <= 2:
@@ -869,11 +871,11 @@ class BaseTracer(ABC):
 
     def _accumulate_hashes(
         self,
-        txs: List[Dict[str, Any]],
-        incoming_amount: Optional[float],
+        txs: list[dict[str, Any]],
+        incoming_amount: float | None,
         chain: str,
         max_select: int = 25,
-    ) -> List[str]:
+    ) -> list[str]:
         """Chronological accumulation per trace_orchestrator.md."""
         if not txs:
             return []
@@ -883,7 +885,7 @@ class BaseTracer(ABC):
 
         accumulated = 0.0
         incoming = float(incoming_amount)
-        selected: List[str] = []
+        selected: list[str] = []
 
         for item in txs:
             tx_hash = item.get("hash") or item.get("tx_hash")
@@ -908,7 +910,7 @@ class BaseTracer(ABC):
 
     # ─── Selector ─────────────────────────────────────────────────────────────
 
-    async def _run_selector(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _run_selector(self, context: dict[str, Any]) -> dict[str, Any] | None:
         try:
             messages = [
                 {"role": "system", "content": self._load_selector_prompt()},
@@ -940,7 +942,7 @@ class BaseTracer(ABC):
             logger.warning(f"Selector failed: {exc}")
             return None
 
-    async def _run_hop_classifier(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _run_hop_classifier(self, context: dict[str, Any]) -> dict[str, Any] | None:
         try:
             messages = [
                 {"role": "system", "content": self._load_hop_classifier_prompt()},
@@ -973,7 +975,7 @@ class BaseTracer(ABC):
 
     # ─── Validator ────────────────────────────────────────────────────────────
 
-    async def _run_validator(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _run_validator(self, payload: dict[str, Any]) -> dict[str, Any]:
         summary = self._summarize_payload(payload)
         logger.info("[PROMPT=trace_validator] entities=%d paths=%d txs=%d",
                     summary["entities"], summary["paths"], summary["txs"])
@@ -1005,11 +1007,11 @@ class BaseTracer(ABC):
     # ─── Orchestrator (main loop) ─────────────────────────────────────────────
 
     async def _run_orchestrator(
-        self, prompt: str, payload: Dict[str, Any],
-        on_progress: Optional[Callable[[str], Awaitable[None]]] = None
-    ) -> Dict[str, Any]:
+        self, prompt: str, payload: dict[str, Any],
+        on_progress: Callable[[str], Awaitable[None]] | None = None
+    ) -> dict[str, Any]:
         """Run the LLM orchestrator with function calling and return parsed JSON."""
-        messages: List[Any] = [
+        messages: list[Any] = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(payload, indent=2)}
         ]
@@ -1023,13 +1025,13 @@ class BaseTracer(ABC):
         max_turns = 100
         consecutive_timeouts = 0
         max_consecutive_timeouts = 3
-        addresses_traced: List[str] = []
+        addresses_traced: list[str] = []
 
-        allowed_token_hashes: Optional[set] = None
-        txs_collected: List[Dict[str, Any]] = []
-        tx_list_collected: List[Dict[str, Any]] = []
-        all_txs_map: Dict[str, Dict[str, Any]] = {}
-        risk_map: Dict[str, float] = {}
+        allowed_token_hashes: set | None = None
+        txs_collected: list[dict[str, Any]] = []
+        tx_list_collected: list[dict[str, Any]] = []
+        all_txs_map: dict[str, dict[str, Any]] = {}
+        risk_map: dict[str, float] = {}
         txs_seen: set = set()
         empty_tool_call_turns = 0
 
@@ -1079,11 +1081,11 @@ class BaseTracer(ABC):
                             pass
                     consecutive_timeouts = 0
 
-                except (asyncio.TimeoutError, APITimeoutError, APIConnectionError) as e:
+                except (TimeoutError, APITimeoutError, APIConnectionError) as e:
                     consecutive_timeouts += 1
                     logger.warning(f"⚠️ Turn {turn + 1}: API error: {type(e).__name__}")
                     if consecutive_timeouts >= max_consecutive_timeouts:
-                        raise RuntimeError(f"API timed out {max_consecutive_timeouts} times consecutively")
+                        raise RuntimeError(f"API timed out {max_consecutive_timeouts} times consecutively") from e
                     await asyncio.sleep(2)
                     continue
 
@@ -1112,7 +1114,7 @@ class BaseTracer(ABC):
                     tool_names = [name for name in tool_names if name]
                     logger.info(f"🔧 LLM requesting {len(tool_names)} tool(s): {', '.join(tool_names)}")
 
-                    assistant_msg: Dict[str, Any]
+                    assistant_msg: dict[str, Any]
                     if hasattr(message, "model_dump"):
                         try:
                             assistant_msg = message.model_dump()
@@ -1177,7 +1179,7 @@ class BaseTracer(ABC):
                             "content": json.dumps({"error": "tool_call_skipped", "tool": skipped.function.name})
                         })
 
-                    all_txs_results: List[Dict[str, Any]] = []
+                    all_txs_results: list[dict[str, Any]] = []
 
                     for tool_call in tool_calls:
                         tool_name = tool_call.function.name
@@ -1210,7 +1212,7 @@ class BaseTracer(ABC):
                                         tool_span.span_data.output = compact
                                 except Exception:
                                     pass
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 logger.error(f"❌ Tool timeout: {tool_name} (limit={_to}s)")
                                 tool_result = json.dumps({"error": "tool_timeout", "tool": tool_name})
                                 try:
@@ -1310,9 +1312,9 @@ class BaseTracer(ABC):
             logger.info(f"TXLIST_ARRAY={json.dumps(self.last_tx_list, ensure_ascii=False)}")
 
     async def _run_agentic_trace(
-        self, payload: Dict[str, Any],
-        on_progress: Optional[Callable[[str], Awaitable[None]]] = None
-    ) -> Dict[str, Any]:
+        self, payload: dict[str, Any],
+        on_progress: Callable[[str], Awaitable[None]] | None = None
+    ) -> dict[str, Any]:
         """Agentic split prompts: selector + hop classifier, tool execution in code."""
         case_meta = payload.get("case_meta", {})
         inputs = payload.get("inputs", {})
@@ -1326,25 +1328,25 @@ class BaseTracer(ABC):
         max_hops = 12
         max_paths = 3
 
-        entities: Dict[str, Dict[str, Any]] = {}
-        annotations: List[Dict[str, Any]] = []
-        paths: Dict[str, Dict[str, Any]] = {}
-        path_seen_addresses: Dict[str, set] = {}
-        path_seen_hashes: Dict[str, set] = {}
+        entities: dict[str, dict[str, Any]] = {}
+        annotations: list[dict[str, Any]] = []
+        paths: dict[str, dict[str, Any]] = {}
+        path_seen_addresses: dict[str, set] = {}
+        path_seen_hashes: dict[str, set] = {}
         path_counter = 1
 
-        all_txs_map: Dict[str, Dict[str, Any]] = {}
-        risk_map: Dict[str, float] = {}
-        owner_hints: Dict[str, Any] = {}
-        txs_collected: List[Dict[str, Any]] = []
-        tx_list_collected: List[Dict[str, Any]] = []
+        all_txs_map: dict[str, dict[str, Any]] = {}
+        risk_map: dict[str, float] = {}
+        owner_hints: dict[str, Any] = {}
+        txs_collected: list[dict[str, Any]] = []
+        tx_list_collected: list[dict[str, Any]] = []
         txs_seen: set = set()
 
         stolen_amount = float(inputs.get("stolen_amount") or payload.get("stolen_amount") or 0.0)
         traced_tolerance = float(inputs.get("traced_amount_tolerance") or payload.get("traced_amount_tolerance") or 0.03)
         fifo_ledger = FIFOLedger(stolen_amount, traced_tolerance)
 
-        async def _call_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
+        async def _call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
             if "blockchain_name" in arguments:
                 arguments["blockchain_name"] = self._normalize_chain(arguments.get("blockchain_name"))
             if "chain" in arguments:
@@ -1366,7 +1368,7 @@ class BaseTracer(ABC):
                     except Exception:
                         pass
                     return result
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.error(f"❌ Tool timeout: {tool_name} (limit={timeout}s)")
                     try:
                         tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
@@ -1383,7 +1385,7 @@ class BaseTracer(ABC):
                         pass
                     return {"error": str(e), "tool": tool_name}
 
-        def _ensure_entity(address: str, role: str, risk_score: float = 0.0, labels: Optional[List[str]] = None, notes: Optional[str] = None):
+        def _ensure_entity(address: str, role: str, risk_score: float = 0.0, labels: list[str] | None = None, notes: str | None = None):
             if not address:
                 return
             current = entities.get(address)
@@ -1419,7 +1421,7 @@ class BaseTracer(ABC):
                 "notes": notes,
             }
 
-        def _add_step(path_id: str, step: Dict[str, Any]):
+        def _add_step(path_id: str, step: dict[str, Any]):
             paths[path_id]["steps"].append(step)
             tx_hash = step.get("tx_hash")
             if tx_hash:
@@ -1435,12 +1437,12 @@ class BaseTracer(ABC):
             path_seen_addresses[new_id] = set(path_seen_addresses.get(from_id, set()))
             path_seen_hashes[new_id] = set(path_seen_hashes.get(from_id, set()))
 
-        hop_queue: List[HopJob] = []
+        hop_queue: list[HopJob] = []
 
         def _parse_get_tx_transfer(
-            tx_data: Dict[str, Any],
-            exclude_address: Optional[str] = None,
-        ) -> Optional[Dict[str, Any]]:
+            tx_data: dict[str, Any],
+            exclude_address: str | None = None,
+        ) -> dict[str, Any] | None:
             """Parse a get_transaction response into a transfer dict.
 
             For UTXO chains, picks the largest output whose address
@@ -1515,10 +1517,10 @@ class BaseTracer(ABC):
         async def _resolve_transfer(
             tx_hash_val: str,
             chain_name: str,
-            address_hint: Optional[str] = None,
-            token_id_val: Optional[int] = None,
-            expected_from: Optional[str] = None,
-        ) -> Optional[Dict[str, Any]]:
+            address_hint: str | None = None,
+            token_id_val: int | None = None,
+            expected_from: str | None = None,
+        ) -> dict[str, Any] | None:
             """Try token_transfers first, fall back to get_transaction for native/UTXO txs."""
             transfer_result = await _call_tool("token_transfers", {
                 "tx_hash": tx_hash_val,
@@ -1547,17 +1549,17 @@ class BaseTracer(ABC):
         async def _fetch_outgoing_txs(
             address: str,
             chain_name: str,
-            incoming_time: Optional[int],
-            token_id: Optional[int],
+            incoming_time: int | None,
+            token_id: int | None,
             max_pages: int = 5,
             page_limit: int = 50,
-        ) -> List[Dict[str, Any]]:
+        ) -> list[dict[str, Any]]:
             """Fetch outgoing txs with pagination, ordered by time asc."""
-            all_items: List[Dict[str, Any]] = []
+            all_items: list[dict[str, Any]] = []
             offset = 0
             pages = 0
             while pages < max_pages:
-                filter_obj: Dict[str, Any] = {}
+                filter_obj: dict[str, Any] = {}
                 if incoming_time:
                     filter_obj["time"] = {">=": incoming_time}
                 if token_id not in (None, 0):
@@ -1588,7 +1590,7 @@ class BaseTracer(ABC):
                 pages += 1
             return all_items
 
-        def _parse_bridge_info(result: Any) -> Dict[str, Any]:
+        def _parse_bridge_info(result: Any) -> dict[str, Any]:
             if not isinstance(result, dict):
                 return {}
 
@@ -1612,7 +1614,7 @@ class BaseTracer(ABC):
                             return found
                 return None
 
-            def _find_dest_obj(obj: Any) -> Optional[Dict[str, Any]]:
+            def _find_dest_obj(obj: Any) -> dict[str, Any] | None:
                 if isinstance(obj, dict):
                     for key in ("destination", "dest", "dst", "destination_info", "dst_info"):
                         v = obj.get(key)
@@ -1670,8 +1672,8 @@ class BaseTracer(ABC):
             chain_name: str,
             address: str,
             asset_symbol: str,
-            fallback: Optional[int] = None,
-        ) -> Optional[int]:
+            fallback: int | None = None,
+        ) -> int | None:
             if not asset_symbol or not address:
                 return fallback
             try:
@@ -1777,7 +1779,7 @@ class BaseTracer(ABC):
             if date_ts:
                 seven_days = 7 * 24 * 3600
                 time_filter = {">=": date_ts - seven_days, "<=": date_ts + seven_days}
-            filter_obj: Dict[str, Any] = {}
+            filter_obj: dict[str, Any] = {}
             if time_filter:
                 filter_obj["time"] = time_filter
             if token_id_hint:
@@ -2205,7 +2207,7 @@ class BaseTracer(ABC):
                     address_age_days = (now_ts - earliest_time) // 86400 if earliest_time else 0
                     tx_count = len(in_data) + len(withdraw_txs)
 
-                    outbound_distribution: Dict[str, float] = {}
+                    outbound_distribution: dict[str, float] = {}
                     for wtx in withdraw_txs[:50]:
                         w_hash = wtx.get("hash") or wtx.get("tx_hash")
                         w_amt = self._normalize_amount(wtx.get("amount_coerced") or wtx.get("amount") or 0, job.chain, job.asset)
@@ -2430,9 +2432,9 @@ class BaseTracer(ABC):
         }
 
     def _collect_token_transfer_data(
-        self, tool_result: str, arguments: Dict[str, Any],
-        all_txs_map: Dict, risk_map: Dict,
-        txs_collected: List, tx_list_collected: List, txs_seen: set
+        self, tool_result: str, arguments: dict[str, Any],
+        all_txs_map: dict, risk_map: dict,
+        txs_collected: list, tx_list_collected: list, txs_seen: set
     ):
         """Helper to collect token transfer data for visualization."""
         try:
@@ -2508,7 +2510,7 @@ class BaseTracer(ABC):
         except Exception:
             pass
 
-    async def _retry_json_response(self, messages: List, message) -> Dict[str, Any]:
+    async def _retry_json_response(self, messages: list, message) -> dict[str, Any]:
         """Retry to get valid JSON from LLM after failed parse."""
         logger.info("[PROMPT=json_completion_retry]")
         messages.append(self._coerce_message_dict(message))
@@ -2549,7 +2551,7 @@ class BaseTracer(ABC):
 
     async def trace(
         self, config: TracerConfig,
-        on_progress: Optional[Callable[[str], Awaitable[None]]] = None
+        on_progress: Callable[[str], Awaitable[None]] | None = None
     ) -> TraceResult:
         """Run a trace."""
         case_id = f"case-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -2562,7 +2564,7 @@ class BaseTracer(ABC):
         config.blockchain_name = self._normalize_chain(config.blockchain_name)
 
         # Extract victim from tx_hash when possible
-        token_id_hint: Optional[int] = None
+        token_id_hint: int | None = None
         if not config.victim_address and config.tx_hash:
             logger.debug(f"Extracting victim from tx_hash: {config.tx_hash}")
             victim_addr, extracted_token_id, extracted_asset, block_time = await extract_victim_from_tx_hash(
@@ -2697,7 +2699,7 @@ class BaseTracer(ABC):
 
         logger.info("Visualization save/share returned result type=%s", type(result).__name__)
 
-        def _deep_find(obj: Any, keys: set) -> Optional[str]:
+        def _deep_find(obj: Any, keys: set) -> str | None:
             if isinstance(obj, dict):
                 for k, v in obj.items():
                     if k in keys and isinstance(v, str) and v:
@@ -2784,9 +2786,9 @@ class BaseTracer(ABC):
 
     @staticmethod
     @lru_cache(maxsize=1)
-    def _chain_alias_map() -> Dict[str, str]:
+    def _chain_alias_map() -> dict[str, str]:
         path = Path(__file__).resolve().parents[1] / "currencies.json"
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -2814,7 +2816,7 @@ class BaseTracer(ABC):
         return mapping
 
     @staticmethod
-    def _normalize_chain(chain: Optional[str]) -> str:
+    def _normalize_chain(chain: str | None) -> str:
         c = (chain or "").strip().lower()
         if not c:
             return c

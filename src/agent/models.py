@@ -1,6 +1,6 @@
-from typing import List, Optional, Dict, Any, Literal, Union
-from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SUPPORTED_BLOCKCHAINS = {"eth", "trx", "btc", "bsc", "matic", "sol", "arb", "op", "avax", "base", "bch", "ltc", "etc", "ada", "xrp"}
 
@@ -19,15 +19,15 @@ _BLOCKCHAIN_ALIASES = {
 
 
 class TracerConfig(BaseModel):
-    description: Optional[str] = None
-    victim_address: Optional[str] = Field(default=None, min_length=1)
+    description: str | None = None
+    victim_address: str | None = Field(default=None, min_length=1)
     blockchain_name: str = "eth"
-    asset_symbol: Optional[str] = None
-    approx_date: Optional[str] = None
-    known_tx_hashes: List[str] = Field(default_factory=list)
-    tx_hash: Optional[str] = None
-    theft_asset: Optional[str] = None
-    stolen_amount: Optional[float] = Field(default=None, ge=0)
+    asset_symbol: str | None = None
+    approx_date: str | None = None
+    known_tx_hashes: list[str] = Field(default_factory=list)
+    tx_hash: str | None = None
+    theft_asset: str | None = None
+    stolen_amount: float | None = Field(default=None, ge=0)
     cex_single_cluster_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
     traced_amount_tolerance: float = Field(default=0.03, ge=0.0, le=1.0)
 
@@ -42,7 +42,7 @@ class TracerConfig(BaseModel):
 
     @field_validator("victim_address")
     @classmethod
-    def validate_victim_address(cls, v: Optional[str]) -> Optional[str]:
+    def validate_victim_address(cls, v: str | None) -> str | None:
         if v is not None:
             v = v.strip()
             if not v:
@@ -51,14 +51,14 @@ class TracerConfig(BaseModel):
 
 class CaseMeta(BaseModel):
     case_id: str
-    trace_id: Optional[str] = None
+    trace_id: str | None = None
     description: str = ""
     victim_address: str
     blockchain_name: str
-    chains: List[str]
+    chains: list[str]
     asset_symbol: str
-    token_id: Optional[int] = None
-    approx_date: Optional[str] = None
+    token_id: int | None = None
+    approx_date: str | None = None
 
 class Step(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -66,55 +66,55 @@ class Step(BaseModel):
     step_index: int
     from_address: str = Field(..., alias="from")
     to_address: str = Field(..., alias="to")
-    tx_hash: Optional[str]
+    tx_hash: str | None
     chain: str
     asset: str
     amount_estimate: float
-    time: Optional[Union[str, int]] = None  # Unix timestamp (int) or ISO 8601 string
+    time: str | int | None = None  # Unix timestamp (int) or ISO 8601 string
     direction: str
     step_type: Literal["direct_transfer", "bridge_in", "bridge_out", "bridge_transfer", "bridge_arrival", "service_deposit", "internal_transfer"]
-    service_label: Optional[str] = None
-    protocol: Optional[str] = None
-    reasoning: Optional[str] = None  # Explanation for why this transaction was selected
-    attributed_amount: Optional[float] = None  # FIFO-attributed theft-origin share
+    service_label: str | None = None
+    protocol: str | None = None
+    reasoning: str | None = None  # Explanation for why this transaction was selected
+    attributed_amount: float | None = None  # FIFO-attributed theft-origin share
 
 class Path(BaseModel):
     path_id: str
     description: str
-    steps: List[Step]
-    stop_reason: Optional[str] = None  # Explanation for why tracing stopped on this path
+    steps: list[Step]
+    stop_reason: str | None = None  # Explanation for why tracing stopped on this path
 
 class Entity(BaseModel):
     address: str
     chain: str
     role: Literal["victim", "perpetrator", "intermediate", "bridge_service", "cex_deposit", "dex_service", "otc_service", "unidentified_service", "cluster"]
-    risk_score: Optional[float] = None
-    riskscore_signals: Dict[str, float] = Field(default_factory=dict)
-    labels: List[str] = Field(default_factory=list)
-    notes: Optional[str] = None
+    risk_score: float | None = None
+    riskscore_signals: dict[str, float] = Field(default_factory=dict)
+    labels: list[str] = Field(default_factory=list)
+    notes: str | None = None
 
 class Annotation(BaseModel):
     id: str
     label: str
-    related_addresses: List[str]
-    related_steps: List[str]
+    related_addresses: list[str]
+    related_steps: list[str]
     text: str
 
 class TraceStats(BaseModel):
     initial_amount_estimate: float
     explored_paths: int
-    terminated_reason: Optional[str] = None
-    total_traced_amount: Optional[float] = None
-    stolen_amount: Optional[float] = None
-    fifo_audit_log: Optional[List[dict]] = None
+    terminated_reason: str | None = None
+    total_traced_amount: float | None = None
+    stolen_amount: float | None = None
+    fifo_audit_log: list[dict] | None = None
 
 class TraceResult(BaseModel):
     case_meta: CaseMeta
-    paths: List[Path]
-    entities: List[Entity]
-    annotations: List[Annotation]
+    paths: list[Path]
+    entities: list[Entity]
+    annotations: list[Annotation]
     trace_stats: TraceStats
-    visualization_url: Optional[str] = None
+    visualization_url: str | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2, by_alias=True)

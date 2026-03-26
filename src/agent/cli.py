@@ -1,18 +1,19 @@
 import asyncio
+import json
 import os
 import sys
-import json
 import termios
 import time
-from typing import Optional
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
-from agent.models import TracerConfig
+
 from agent.mcp_client import MCPClient
 from agent.mcp_tracer import MCPTracer
+from agent.models import TracerConfig
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
+
 
 def flush_input():
     """Flush standard input to avoid skipping prompts due to pasted multi-line text."""
@@ -22,17 +23,17 @@ def flush_input():
         pass  # Not a TTY or stdin unavailable
 
 async def run_trace(
-    description: Optional[str] = None,
-    victim_address: Optional[str] = None,
+    description: str | None = None,
+    victim_address: str | None = None,
     blockchain: str = "eth",
-    asset: Optional[str] = None,
-    date: Optional[str] = None,
-    tx_hashes: Optional[str] = None,
-    tx_hash: Optional[str] = None,
-    theft_asset: Optional[str] = None,
-    stolen_amount: Optional[float] = None,
-    cex_single_cluster_threshold: Optional[float] = None,
-    traced_amount_tolerance: Optional[float] = None
+    asset: str | None = None,
+    date: str | None = None,
+    tx_hashes: str | None = None,
+    tx_hash: str | None = None,
+    theft_asset: str | None = None,
+    stolen_amount: float | None = None,
+    cex_single_cluster_threshold: float | None = None,
+    traced_amount_tolerance: float | None = None
 ):
     if victim_address and tx_hash:
         print(f"Starting trace for transaction {tx_hash} (victim: {victim_address}) on {blockchain}...")
@@ -166,7 +167,7 @@ def main():
                 try:
                     parsed_info = asyncio.run(parse_case_description_with_llm(description))
                     if parsed_info:
-                        print(f"\nExtracted information:")
+                        print("\nExtracted information:")
                         for key, value in parsed_info.items():
                             if value is not None:
                                 print(f"  {key}: {value}")

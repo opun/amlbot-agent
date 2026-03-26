@@ -1,9 +1,10 @@
 
-import sys
 import json
 import logging
+import sys
 from datetime import datetime
-from agent.models import TraceResult, CaseMeta, Entity, Path, Step, TraceStats
+
+from agent.models import CaseMeta, Entity, Path, Step, TraceResult, TraceStats
 from agent.visualization import generate_visualization_payload
 
 # Configure logging
@@ -60,7 +61,7 @@ def verify_payload_structure():
     paths = [
         Path(path_id="path-1", description="Main theft path", steps=steps)
     ]
-    
+
     trace_stats = TraceStats(initial_amount_estimate=10.0, explored_paths=1)
 
     trace_result = TraceResult(
@@ -73,7 +74,7 @@ def verify_payload_structure():
 
     # 2. Generate Payload
     payload_data = generate_visualization_payload(trace_result)
-    
+
     # 3. Verify Structure
     logger.info("Verifying Top Level Fields...")
     assert "createdAt" in payload_data, "Missing createdAt"
@@ -81,17 +82,17 @@ def verify_payload_structure():
     assert "hash" in payload_data, "Missing hash"
     assert "payload" in payload_data, "Missing payload"
     assert "helpers" in payload_data, "Missing helpers"
-    
+
     payload = payload_data["payload"]
     helpers = payload_data["helpers"]
-    
+
     logger.info("Verifying Payload Fields...")
     assert "comments" in payload, "Missing payload.comments"
     assert "connects" in payload, "Missing payload.connects"
     assert "items" in payload, "Missing payload.items"
     assert "txs" in payload, "Missing payload.txs"
     assert "transform" in payload, "Missing payload.transform"
-    
+
     # Verify Comments
     if payload["comments"]:
         comment = payload["comments"][0]
@@ -134,12 +135,12 @@ def verify_payload_structure():
     logger.info("Verifying Helpers...")
     assert "currencyInfo" in helpers, "Helpers missing currencyInfo"
     assert "txList" in helpers, "Helpers missing txList"
-    
+
     # Verify Currency Info
     currencies = {c["currency"]: c for c in helpers["currencyInfo"]}
     assert "trx" in currencies, "Missing TRX currency info"
     # Check for USDT if present in trace (in mocks we used ETH, let's update mock to usage TRX for better test matching)
-    
+
     # Verify AutoTxs logic (should be present even if empty list, but we want to test population)
     assert "autoTxs" in helpers, "Helpers missing autoTxs"
 
@@ -150,11 +151,11 @@ def verify_payload_structure():
         assert "outputs" in tx_item, "TxList item missing outputs"
         assert "addressesCount" in tx_item, "TxList item missing addressesCount"
         assert "poolTime" in tx_item, "TxList item missing poolTime"
-        
+
     logger.info("✅ Verification Successful!")
     # Print a snippet of currency info and autoTxs for manual check
     print("Currency Info:", json.dumps(helpers["currencyInfo"], indent=2))
-    
+
     attacker_auto = next((item for item in helpers["autoTxs"] if item["address"] == "0xAttacker"), None)
     print("Attacker AutoTxs:", json.dumps(attacker_auto, indent=2))
     print("AutoTxs Sample:", json.dumps(helpers["autoTxs"][:1], indent=2))

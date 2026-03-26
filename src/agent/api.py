@@ -6,31 +6,34 @@ import asyncio
 import json
 import logging
 import re
-import uuid
 import time
-from typing import Optional, AsyncGenerator, Dict, Any, List
-from datetime import datetime
+import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Load .env file before anything else
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
-from pydantic import BaseModel, Field
 import os
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
-from agent.models import TracerConfig, TraceResult
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from agent.http_tracer import HTTPTracer
 from agent.mcp_client import MCPClient
 from agent.mcp_http_client import MCPHTTPClient
 from agent.mcp_tracer import MCPTracer
-from agent.http_tracer import HTTPTracer
+from agent.models import TracerConfig, TraceResult
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
 
@@ -45,7 +48,7 @@ class ContinuationOption(BaseModel):
     to_address: str
     amount: float
     asset: str
-    time: Optional[str] = None
+    time: str | None = None
     description: str
 
 
@@ -53,13 +56,13 @@ class ContinuationOption(BaseModel):
 class SessionState(BaseModel):
     session_id: str
     step: str = "initial"  # initial, collecting, confirming, tracing, trace_complete, awaiting_continuation
-    collected_info: Dict[str, Any] = Field(default_factory=dict)
-    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
+    collected_info: dict[str, Any] = Field(default_factory=dict)
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
     # Trace state for continuation
-    last_trace_result: Optional[Dict[str, Any]] = None
-    continuation_point: Optional[Dict[str, Any]] = None  # {address, blockchain, asset, token_id}
-    continuation_options: List[Dict[str, Any]] = Field(default_factory=list)
+    last_trace_result: dict[str, Any] | None = None
+    continuation_point: dict[str, Any] | None = None  # {address, blockchain, asset, token_id}
+    continuation_options: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):
@@ -69,27 +72,27 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None  # Can be passed from NextAuth session
+    session_id: str | None = None
+    user_id: str | None = None  # Can be passed from NextAuth session
 
 
 class TraceRequest(BaseModel):
-    description: Optional[str] = None
-    victim_address: Optional[str] = None
+    description: str | None = None
+    victim_address: str | None = None
     blockchain: str = "eth"
-    asset: Optional[str] = None
-    date: Optional[str] = None
-    tx_hashes: Optional[list[str]] = None
-    tx_hash: Optional[str] = None
-    theft_asset: Optional[str] = None
-    user_id: Optional[str] = None  # Can be passed from NextAuth session
-    stolen_amount: Optional[float] = None
-    cex_single_cluster_threshold: Optional[float] = None
-    traced_amount_tolerance: Optional[float] = None
+    asset: str | None = None
+    date: str | None = None
+    tx_hashes: list[str] | None = None
+    tx_hash: str | None = None
+    theft_asset: str | None = None
+    user_id: str | None = None  # Can be passed from NextAuth session
+    stolen_amount: float | None = None
+    cex_single_cluster_threshold: float | None = None
+    traced_amount_tolerance: float | None = None
 
 
 # In-memory session storage (use Redis in production)
-sessions: Dict[str, SessionState] = {}
+sessions: dict[str, SessionState] = {}
 SESSION_MAX_COUNT = int(os.getenv("SESSION_MAX_COUNT", "1000"))
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))  # 1 hour
 
@@ -106,7 +109,7 @@ def _cleanup_expired_sessions() -> int:
     return len(expired)
 
 
-def get_user_id_from_request(request: Request, body_user_id: Optional[str] = None) -> Optional[str]:
+def get_user_id_from_request(request: Request, body_user_id: str | None = None) -> str | None:
     """Extract userId from multiple sources (priority order):
     1. Body parameter (from NextAuth session)
     2. X-User-Id header
@@ -221,12 +224,12 @@ _RE_ASSET = re.compile(r'\b(USDT|USDC|ETH|BTC|TRX|BNB|MATIC|SOL|ADA|XRP|BCH|LTC|
 _RE_DATE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
 
 
-def fast_parse_input(message: str) -> Dict[str, Any]:
+def fast_parse_input(message: str) -> dict[str, Any]:
     """
     Fast regex-based parsing for simple inputs like addresses and tx hashes.
     Avoids LLM call for simple cases.
     """
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
 
     # Ethereum address pattern (0x + 40 hex chars)
     eth_address = _RE_ETH_ADDRESS.search(message)
@@ -335,7 +338,7 @@ def fast_parse_input(message: str) -> Dict[str, Any]:
     return result
 
 
-def get_or_create_session(session_id: Optional[str]) -> SessionState:
+def get_or_create_session(session_id: str | None) -> SessionState:
     """Get existing session or create a new one."""
     if session_id and session_id in sessions:
         return sessions[session_id]
@@ -355,7 +358,7 @@ def get_or_create_session(session_id: Optional[str]) -> SessionState:
     return session
 
 
-def format_collected_info(info: Dict[str, Any]) -> str:
+def format_collected_info(info: dict[str, Any]) -> str:
     """Format collected information for display."""
     lines = []
 
@@ -379,7 +382,7 @@ def format_collected_info(info: Dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "No information collected yet."
 
 
-def get_missing_required_fields(info: Dict[str, Any]) -> List[str]:
+def get_missing_required_fields(info: dict[str, Any]) -> list[str]:
     """Check what required fields are still missing."""
     missing = []
 
@@ -401,7 +404,7 @@ def get_missing_required_fields(info: Dict[str, Any]) -> List[str]:
     return missing
 
 
-def build_clarification_message(info: Dict[str, Any], missing: List[str]) -> str:
+def build_clarification_message(info: dict[str, Any], missing: list[str]) -> str:
     """Build a message asking for missing information."""
     current = format_collected_info(info)
 
@@ -430,7 +433,7 @@ def build_clarification_message(info: Dict[str, Any], missing: List[str]) -> str
     return msg
 
 
-def build_continuation_message(session: SessionState) -> Dict[str, Any]:
+def build_continuation_message(session: SessionState) -> dict[str, Any]:
     """Build a message offering continuation options."""
     options = session.continuation_options
 
@@ -475,7 +478,7 @@ def build_continuation_message(session: SessionState) -> Dict[str, Any]:
     }
 
 
-def build_confirmation_message(info: Dict[str, Any]) -> str:
+def build_confirmation_message(info: dict[str, Any]) -> str:
     """Build a confirmation message before starting trace."""
     current = format_collected_info(info)
 
@@ -496,8 +499,8 @@ def build_confirmation_message(info: Dict[str, Any]) -> str:
 
 async def run_trace_streaming(
     config: TracerConfig,
-    session: Optional[SessionState] = None,
-    user_id: Optional[str] = None
+    session: SessionState | None = None,
+    user_id: str | None = None
 ) -> AsyncGenerator[str, None]:
     """Run a trace and yield streaming updates."""
 
@@ -523,7 +526,7 @@ async def run_trace_streaming(
 
 async def _run_trace_http(
     config: TracerConfig,
-    session: Optional[SessionState],
+    session: SessionState | None,
     user_id: str,
     mcp_server_url: str
 ) -> AsyncGenerator[str, None]:
@@ -561,7 +564,7 @@ async def _run_trace_http(
                     logger.info("Streaming event: status")
                     yield json.dumps({"type": "status", "message": msg}) + "\n"
                     last_status_ts = time.time()
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if time.time() - last_status_ts > 15:
                         logger.info("Streaming event: status (keepalive)")
                         yield json.dumps({"type": "status", "message": "Still analyzing..."} ) + "\n"
@@ -640,7 +643,7 @@ async def _run_trace_http(
 
 async def _run_trace_stdio(
     config: TracerConfig,
-    session: Optional[SessionState],
+    session: SessionState | None,
     user_id: str
 ) -> AsyncGenerator[str, None]:
     """Run trace using stdio MCP server (Docker)."""
@@ -686,7 +689,7 @@ async def _run_trace_stdio(
                         logger.info("Streaming event: status")
                         yield json.dumps({"type": "status", "message": msg}) + "\n"
                         last_status_ts = time.time()
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         if time.time() - last_status_ts > 15:
                             logger.info("Streaming event: status (keepalive)")
                             yield json.dumps({"type": "status", "message": "Still analyzing..."} ) + "\n"
@@ -757,7 +760,7 @@ async def _extract_continuation_options_http(
     result: TraceResult,
     client: MCPHTTPClient,
     config: TracerConfig
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Extract continuation options using HTTP client."""
     options = []
 
@@ -833,7 +836,7 @@ async def extract_continuation_options(
     result: TraceResult,
     client: MCPClient,
     config: TracerConfig
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Extract potential continuation points from trace result.
     Only returns options when user decision is genuinely needed:
@@ -1138,7 +1141,7 @@ async def chat(request: ChatRequest, http_request: Request):
     # the field the user is most likely answering (the one that's currently missing).
     pre_missing = get_missing_required_fields(session.collected_info)
     chain_is_missing = any("blockchain" in m for m in pre_missing)
-    asset_is_missing = any("theft_asset" in m for m in pre_missing)
+    any("theft_asset" in m for m in pre_missing)
 
     parsed_chain = parsed_info.get("blockchain_name", "")
     parsed_asset = (parsed_info.get("theft_asset") or "")
@@ -1214,7 +1217,7 @@ async def start_trace(request: TraceRequest, http_request: Request):
             detail="Either victim_address or tx_hash must be provided"
         )
 
-    config_kwargs: Dict[str, Any] = dict(
+    config_kwargs: dict[str, Any] = dict(
         description=request.description,
         victim_address=request.victim_address,
         blockchain_name=request.blockchain,

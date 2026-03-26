@@ -1,8 +1,7 @@
 import logging
-from typing import List, Set, Tuple
 from datetime import datetime
 
-from agent.models import TraceResult, Path, Step, Entity, Annotation
+from agent.models import Annotation, Entity, Path, Step, TraceResult
 
 logger = logging.getLogger("trace_postprocess")
 
@@ -57,8 +56,8 @@ def postprocess_trace_result(trace_result: TraceResult) -> TraceResult:
     - Detect cycles and annotate.
     - Ensure entities exist for all addresses.
     """
-    new_paths: List[Path] = []
-    annotations: List[Annotation] = list(trace_result.annotations or [])
+    new_paths: list[Path] = []
+    annotations: list[Annotation] = list(trace_result.annotations or [])
     annotation_counter = len(annotations) + 1
 
     # Collect existing entities
@@ -81,7 +80,7 @@ def postprocess_trace_result(trace_result: TraceResult) -> TraceResult:
         if not path.steps:
             continue
 
-        current_steps: List[Step] = []
+        current_steps: list[Step] = []
         prev_to = None
         split_index = 0
 
@@ -139,7 +138,7 @@ def postprocess_trace_result(trace_result: TraceResult) -> TraceResult:
 
     # Cycle detection
     for path in new_paths:
-        seen: Set[Tuple[str, str]] = set()
+        seen: set[tuple[str, str]] = set()
         for step in path.steps:
             key = (step.to_address, step.chain)
             if key in seen:

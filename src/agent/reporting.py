@@ -176,7 +176,6 @@ def build_mermaid_graph(trace_result: TraceResult) -> str:
     """
     Generate a Mermaid flowchart diagram of the trace.
     """
-    import re
 
     mermaid = ["flowchart TD"]
 
@@ -312,7 +311,7 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
     lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
     lines.append("")
 
-    for path_idx, path in enumerate(trace_result.paths):
+    for _path_idx, path in enumerate(trace_result.paths):
         # Path header
         lines.append(f"┌─ Path {path.path_id} ─────────────────────────────────────────────────────────────")
         if path.description:
@@ -334,13 +333,11 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
             step_type_str = step.step_type.replace("_", " ").title()
 
             if is_last:
-                connector = "└"
                 prefix = "   "
             else:
-                connector = "├"
                 prefix = "│  "
 
-            lines.append(f"│  │")
+            lines.append("│  │")
             lines.append(f"│  │ ──[ {amount_str} ]── {step_type_str}")
             if step.tx_hash:
                 lines.append(f"│  │    tx: {step.tx_hash[:20]}...{step.tx_hash[-8:]}")
@@ -353,7 +350,7 @@ def build_ascii_tree(trace_result: TraceResult) -> str:
                     prefix = "💭 " if idx == 0 else "   "
                     lines.append(f"│  │    {prefix}{r_line}")
 
-            lines.append(f"│  ▼")
+            lines.append("│  ▼")
 
             # Destination node
             lines.append(f"│  {format_address(step.to_address)}")

@@ -2,29 +2,29 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
+from agent.mcp_client import MCPClient
+from agent.mcp_http_client import MCPHTTPClient
 from agent.models import (
-    TracerConfig,
-    TraceResult,
+    Annotation,
     CaseMeta,
+    Entity,
     Path,
     Step,
-    Entity,
-    Annotation,
+    TracerConfig,
+    TraceResult,
     TraceStats,
 )
 from agent.theft_detection import (
-    infer_asset_symbol,
-    infer_approx_date_from_description,
     extract_victim_from_tx_hash,
+    infer_approx_date_from_description,
+    infer_asset_symbol,
 )
-from agent.mcp_client import MCPClient
-from agent.mcp_http_client import MCPHTTPClient
 
 logger = logging.getLogger("deterministic_tracer")
 
-AnyMCPClient = Union[MCPClient, MCPHTTPClient]
+AnyMCPClient = MCPClient | MCPHTTPClient
 
 ALLOWED_STEP_TYPES = {
     "direct_transfer",
@@ -41,10 +41,10 @@ ALLOWED_STEP_TYPES = {
 class TxCandidate:
     tx_hash: str
     amount: float
-    block_time: Optional[int]
-    recipient: Optional[str]
-    asset: Optional[str]
-    token_id: Optional[int]
+    block_time: int | None
+    recipient: str | None
+    asset: str | None
+    token_id: int | None
 
 
 def _unwrap_tool_result(result: Any) -> Any:
@@ -61,7 +61,7 @@ def _unwrap_tool_result(result: Any) -> Any:
     return result
 
 
-def _extract_list(result: Any, keys: List[str]) -> List[Dict[str, Any]]:
+def _extract_list(result: Any, keys: list[str]) -> list[dict[str, Any]]:
     if not isinstance(result, dict):
         return []
     for key in keys:
@@ -84,7 +84,7 @@ def _parse_amount(value: Any) -> float:
     return 0.0
 
 
-def _parse_int(value: Any) -> Optional[int]:
+def _parse_int(value: Any) -> int | None:
     if value is None:
         return None
     if isinstance(value, int):
@@ -99,15 +99,15 @@ def _parse_int(value: Any) -> Optional[int]:
     return None
 
 
-def _extract_owner_and_risk(aml_result: Any) -> Tuple[float, Dict[str, float], List[str], Optional[str]]:
+def _extract_owner_and_risk(aml_result: Any) -> tuple[float, dict[str, float], list[str], str | None]:
     data = _unwrap_tool_result(aml_result)
     if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
         data = data["data"]
 
     risk_score = 0.0
-    signals: Dict[str, float] = {}
+    signals: dict[str, float] = {}
     owner_name = None
-    labels: List[str] = []
+    labels: list[str] = []
 
     if isinstance(data, dict):
         riskscore = data.get("riskscore") or data.get("risk_score") or {}
@@ -129,7 +129,7 @@ def _extract_owner_and_risk(aml_result: Any) -> Tuple[float, Dict[str, float], L
     return risk_score, signals, labels, owner_name
 
 
-def _extract_service_platforms(extra_result: Any) -> List[str]:
+def _extract_service_platforms(extra_result: Any) -> list[str]:
     data = _unwrap_tool_result(extra_result)
     if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
         data = data["data"]
@@ -142,7 +142,7 @@ def _extract_service_platforms(extra_result: Any) -> List[str]:
     return []
 
 
-def _extract_transfer_fields(transfer: Dict[str, Any], chain: str) -> Tuple[Optional[str], Optional[str], float, Optional[int], Optional[int], Optional[str]]:
+def _extract_transfer_fields(transfer: dict[str, Any], chain: str) -> tuple[str | None, str | None, float, int | None, int | None, str | None]:
     input_data = transfer.get("input") or {}
     output_data = transfer.get("output") or {}
 
@@ -183,19 +183,19 @@ def _extract_transfer_fields(transfer: Dict[str, Any], chain: str) -> Tuple[Opti
     return sender, recipient, amount, token_id, block_time, asset
 
 
-def _matches_keywords(text: str, keywords: List[str]) -> bool:
+def _matches_keywords(text: str, keywords: list[str]) -> bool:
     text_lower = text.lower()
     return any(k in text_lower for k in keywords)
 
 
 def _detect_role(
-    owner_name: Optional[str],
-    labels: List[str],
-    service_platforms: List[str],
+    owner_name: str | None,
+    labels: list[str],
+    service_platforms: list[str],
     hop_index: int,
     is_victim: bool,
     risk_score: float,
-) -> Tuple[str, bool, Optional[str], Optional[str]]:
+) -> tuple[str, bool, str | None, str | None]:
     owner_text = " ".join([x for x in [owner_name] + labels if x])
     services_text = " ".join(service_platforms)
 
@@ -231,7 +231,7 @@ def _detect_role(
     return "intermediate", False, None, None
 
 
-def _parse_date_to_timestamp(date_str: str) -> Optional[int]:
+def _parse_date_to_timestamp(date_str: str) -> int | None:
     try:
         dt = datetime.fromisoformat(date_str)
         return int(dt.timestamp())
@@ -246,9 +246,9 @@ class RuleBasedTracer:
         self.max_paths = max_paths
 
     async def _get_outgoing_txs(
-        self, address: str, chain: str, token_id: Optional[int], start_time: Optional[int]
-    ) -> List[Dict[str, Any]]:
-        filter_criteria: Dict[str, Any] = {}
+        self, address: str, chain: str, token_id: int | None, start_time: int | None
+    ) -> list[dict[str, Any]]:
+        filter_criteria: dict[str, Any] = {}
         if start_time is not None:
             filter_criteria["time"] = {">=": start_time}
         if token_id is not None:
@@ -268,7 +268,7 @@ class RuleBasedTracer:
         txs = _extract_list(result, ["data", "result", "transactions", "txs", "items"])
         return txs
 
-    async def _resolve_transfer_from_tx(self, tx_hash: str, chain: str) -> Optional[TxCandidate]:
+    async def _resolve_transfer_from_tx(self, tx_hash: str, chain: str) -> TxCandidate | None:
         transfer_result = await self.client.token_transfers(tx_hash, chain)
         transfer_result = _unwrap_tool_result(transfer_result)
         transfers = _extract_list(transfer_result, ["data", "result", "transfers", "items"])
@@ -304,7 +304,7 @@ class RuleBasedTracer:
         asset_symbol: str,
         hop_index: int,
         is_victim: bool,
-    ) -> Tuple[Entity, bool, Optional[str], Optional[str], float]:
+    ) -> tuple[Entity, bool, str | None, str | None, float]:
         aml_result = await self.client.get_address(chain, address)
         extra_result = await self.client.get_extra_address_info(address, asset_symbol)
 
@@ -336,7 +336,7 @@ class RuleBasedTracer:
 
     async def _resolve_token_id_for_address(
         self, chain: str, address: str, asset_symbol: str
-    ) -> Optional[int]:
+    ) -> int | None:
         try:
             stats = await self.client.token_stats(chain, address)
             stats = _unwrap_tool_result(stats)
@@ -387,14 +387,14 @@ class RuleBasedTracer:
             approx_date=config.approx_date,
         )
 
-        annotations: List[Annotation] = []
-        entities: Dict[Tuple[str, str], Entity] = {}
-        paths: List[Path] = []
+        annotations: list[Annotation] = []
+        entities: dict[tuple[str, str], Entity] = {}
+        paths: list[Path] = []
 
         initial_amount = 0.0
-        initial_time: Optional[int] = None
-        initial_recipient: Optional[str] = None
-        initial_tx_hash: Optional[str] = None
+        initial_time: int | None = None
+        initial_recipient: str | None = None
+        initial_tx_hash: str | None = None
         initial_chain = config.blockchain_name
 
         if config.tx_hash:
@@ -430,7 +430,7 @@ class RuleBasedTracer:
                     ] or txs
 
             # Choose largest outgoing
-            def tx_amount(t: Dict[str, Any]) -> float:
+            def tx_amount(t: dict[str, Any]) -> float:
                 return _parse_amount(t.get("amount") or t.get("amount_coerced") or t.get("value"))
 
             selected = max(filtered, key=tx_amount)
@@ -486,7 +486,6 @@ class RuleBasedTracer:
                 "visited": {(config.victim_address, initial_chain), (initial_recipient, initial_chain)},
             }
         ]
-        path_counter = 1
         annotation_counter = 1
         chain_set = {config.blockchain_name}
 
@@ -504,10 +503,10 @@ class RuleBasedTracer:
 
         while stack and len(paths) < self.max_paths:
             state = stack.pop()
-            steps: List[Step] = state["steps"]
+            steps: list[Step] = state["steps"]
             current_address: str = state["current_address"]
             incoming_amount: float = state["incoming_amount"] or 0.0
-            incoming_time: Optional[int] = state["incoming_time"]
+            incoming_time: int | None = state["incoming_time"]
             chain: str = state["chain"]
             token_id = state["token_id"]
             hop_index = state["hop_index"]
@@ -658,7 +657,7 @@ class RuleBasedTracer:
                 continue
 
             # Resolve txs and build candidates
-            candidates: List[TxCandidate] = []
+            candidates: list[TxCandidate] = []
             for tx in txs:
                 tx_hash = tx.get("hash") or tx.get("tx_hash")
                 if not tx_hash:
@@ -685,7 +684,7 @@ class RuleBasedTracer:
                 continue
 
             # Chronological accumulation
-            selected: List[TxCandidate] = []
+            selected: list[TxCandidate] = []
             accumulated = 0.0
             for cand in candidates:
                 selected.append(cand)

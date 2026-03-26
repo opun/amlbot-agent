@@ -3,7 +3,7 @@ HTTP Tracer - extends BaseTracer with HTTP-based tool execution.
 Uses MCPHTTPClient to call remote MCP server via HTTP API.
 """
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from .base_tracer import BaseTracer
 from .mcp_http_client import MCPHTTPClient
@@ -22,7 +22,7 @@ class HTTPTracer(BaseTracer):
     def _get_client(self):
         return self.client
 
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool via HTTP API."""
         logger.info(f"Executing {tool_name} via HTTP")
         return await dispatch_tool(self.client, tool_name, arguments)

@@ -1,12 +1,14 @@
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any
+
 from agent.mcp_client import MCPClient
 from agent.models import Entity
+
 
 class AddressClassifier:
     def __init__(self, client: MCPClient):
         self.client = client
 
-    async def classify(self, address: str, chain: str, asset_symbol: str, context: Dict[str, Any]) -> Entity:
+    async def classify(self, address: str, chain: str, asset_symbol: str, context: dict[str, Any]) -> Entity:
         """
         Lightweight wrapper to fetch AML data for an address.
         The LLM orchestrator is expected to reason over this data.
@@ -19,7 +21,7 @@ class AddressClassifier:
 
         owner_data = data.get("owner") or {}
 
-        labels: List[str] = []
+        labels: list[str] = []
         reason = "LLM-driven classification; deterministic rules removed."
 
         if owner_data.get("name"):

@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any, Union
+from typing import Any
 
 from agents import Agent, Runner, function_span
 
@@ -11,7 +11,7 @@ from agent.mcp_http_client import MCPHTTPClient
 from agent.models import TracerConfig
 
 # Type alias for client
-AnyMCPClient = Union[MCPClient, MCPHTTPClient]
+AnyMCPClient = MCPClient | MCPHTTPClient
 
 logger = logging.getLogger("theft_detection")
 
@@ -428,7 +428,7 @@ async def extract_victim_from_tx_hash(
 
     except Exception as e:
         logger.error(f"Error extracting victim from tx_hash {tx_hash}: {e}")
-        raise ValueError(f"Failed to extract victim from transaction {tx_hash}: {e}")
+        raise ValueError(f"Failed to extract victim from transaction {tx_hash}: {e}") from e
 
 async def infer_asset_symbol(config: TracerConfig, client: AnyMCPClient) -> tuple[str, int]:
     """

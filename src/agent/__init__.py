@@ -1,14 +1,14 @@
-import os
-
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Expose key classes for easier imports
-from .base_tracer import BaseTracer
-from .http_tracer import HTTPTracer
-from .mcp_client import MCPClient
-from .mcp_http_client import MCPHTTPClient, VisualizationAPIClient
-from .mcp_tracer import MCPTracer
-from .models import Entity, TracerConfig, TraceResult
-from .visualization import generate_visualization_payload
+from .base_tracer import BaseTracer as BaseTracer
+from .http_tracer import HTTPTracer as HTTPTracer
+from .mcp_client import MCPClient as MCPClient
+from .mcp_http_client import MCPHTTPClient as MCPHTTPClient
+from .mcp_http_client import VisualizationAPIClient as VisualizationAPIClient
+from .mcp_tracer import MCPTracer as MCPTracer
+from .models import Entity as Entity
+from .models import TracerConfig as TracerConfig
+from .models import TraceResult as TraceResult
+from .visualization import generate_visualization_payload as generate_visualization_payload

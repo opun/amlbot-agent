@@ -1085,7 +1085,7 @@ class BaseTracer(ABC):
                     consecutive_timeouts += 1
                     logger.warning(f"⚠️ Turn {turn + 1}: API error: {type(e).__name__}")
                     if consecutive_timeouts >= max_consecutive_timeouts:
-                        raise RuntimeError(f"API timed out {max_consecutive_timeouts} times consecutively")
+                        raise RuntimeError(f"API timed out {max_consecutive_timeouts} times consecutively") from e
                     await asyncio.sleep(2)
                     continue
 

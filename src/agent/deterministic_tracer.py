@@ -2,7 +2,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Union
+from typing import Any
 
 from agent.mcp_client import MCPClient
 from agent.mcp_http_client import MCPHTTPClient
@@ -24,7 +24,7 @@ from agent.theft_detection import (
 
 logger = logging.getLogger("deterministic_tracer")
 
-AnyMCPClient = Union[MCPClient, MCPHTTPClient]
+AnyMCPClient = MCPClient | MCPHTTPClient
 
 ALLOWED_STEP_TYPES = {
     "direct_transfer",

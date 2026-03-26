@@ -545,6 +545,8 @@ class BaseTracer(ABC):
                 logger.warning("Could not parse date string: %s", date_str)
                 return None
 
+    _SATOSHI_CHAINS = {"btc", "bch", "ltc"}
+
     def _normalize_amount(self, amount: Any, chain: str, asset: Optional[str] = None) -> float:
         try:
             val = float(amount)
@@ -561,6 +563,11 @@ class BaseTracer(ABC):
             if scaled >= 1e9:
                 return scaled / 1e6
             return scaled
+        # BTC/BCH/LTC: get_transaction returns satoshis (1e8 per coin).
+        # all_txs returns amount_coerced already in user units, so only
+        # convert when the value looks like satoshis (>= 1e6).
+        if chain in self._SATOSHI_CHAINS and val >= 1e6:
+            return val / 1e8
         return val
 
     def _resolve_amount(
@@ -1430,6 +1437,113 @@ class BaseTracer(ABC):
 
         hop_queue: List[HopJob] = []
 
+        def _parse_get_tx_transfer(
+            tx_data: Dict[str, Any],
+            exclude_address: Optional[str] = None,
+        ) -> Optional[Dict[str, Any]]:
+            """Parse a get_transaction response into a transfer dict.
+
+            For UTXO chains, picks the largest output whose address
+            differs from *exclude_address* (the sender / change address).
+            """
+            if not isinstance(tx_data, dict) or not tx_data:
+                return None
+
+            inp = tx_data.get("input") or tx_data.get("inputs")
+            out = tx_data.get("output") or tx_data.get("outputs")
+
+            from_addr = None
+            inp_riskscore = None
+            if isinstance(inp, dict):
+                from_addr = inp.get("address")
+                inp_riskscore = inp.get("riskscore")
+            elif isinstance(inp, list) and inp:
+                first_inp = inp[0] if isinstance(inp[0], dict) else {}
+                from_addr = first_inp.get("address")
+                inp_riskscore = first_inp.get("riskscore")
+
+            to_addr = None
+            out_riskscore = None
+            out_owner = None
+            out_amount = None  # Track the selected output's amount for UTXO
+            if isinstance(out, dict):
+                to_addr = out.get("address")
+                out_riskscore = out.get("riskscore")
+                out_owner = out.get("owner")
+                out_amount = out.get("amount")
+            elif isinstance(out, list) and out:
+                # UTXO: pick the largest output that isn't the sender (change)
+                candidates = [o for o in out if isinstance(o, dict) and o.get("address") != exclude_address]
+                if not candidates:
+                    candidates = [o for o in out if isinstance(o, dict)]
+                if candidates:
+                    best = max(candidates, key=lambda o: float(o.get("amount", 0)))
+                    to_addr = best.get("address")
+                    out_riskscore = best.get("riskscore")
+                    out_owner = best.get("owner")
+                    out_amount = best.get("amount")
+
+            if not from_addr:
+                from_addr = tx_data.get("from") or tx_data.get("sender")
+            if not to_addr:
+                to_addr = tx_data.get("to") or tx_data.get("recipient")
+
+            if not from_addr and not to_addr:
+                return None
+
+            # Resolve amount: prefer selected output amount (UTXO), then
+            # top-level amount (account-model), then total_out/total_in.
+            amount = (
+                out_amount
+                or tx_data.get("amount")
+                or tx_data.get("total_out")
+                or tx_data.get("total_in")
+                or 0.0
+            )
+
+            return {
+                "from": from_addr,
+                "to": to_addr,
+                "amount": amount,
+                "block_time": tx_data.get("block_time"),
+                "token_id": tx_data.get("token_id", 0),
+                "output_owner": out_owner,
+                "input_riskscore": inp_riskscore,
+                "output_riskscore": out_riskscore,
+            }
+
+        async def _resolve_transfer(
+            tx_hash_val: str,
+            chain_name: str,
+            address_hint: Optional[str] = None,
+            token_id_val: Optional[int] = None,
+            expected_from: Optional[str] = None,
+        ) -> Optional[Dict[str, Any]]:
+            """Try token_transfers first, fall back to get_transaction for native/UTXO txs."""
+            transfer_result = await _call_tool("token_transfers", {
+                "tx_hash": tx_hash_val,
+                "blockchain_name": chain_name,
+            })
+            transfer = self._parse_transfer(transfer_result, expected_from=expected_from, token_id=token_id_val)
+            if transfer and transfer.get("to"):
+                return transfer
+
+            # Fallback: get_transaction (needed for native ETH, BTC, BCH, LTC, etc.)
+            if not address_hint:
+                return None
+            logger.info(f"token_transfers empty for {tx_hash_val[:16]}...; falling back to get_transaction")
+            tx_result = await _call_tool("get_transaction", {
+                "address": address_hint,
+                "tx_hash": tx_hash_val,
+                "blockchain_name": chain_name,
+                "token_id": 0,
+                "path": "0",
+            })
+            tx_data = tx_result.get("data", {}) if isinstance(tx_result, dict) else {}
+            if isinstance(tx_data, list) and tx_data:
+                tx_data = tx_data[0]
+            return _parse_get_tx_transfer(tx_data, exclude_address=address_hint)
+
         async def _fetch_outgoing_txs(
             address: str,
             chain_name: str,
@@ -1578,71 +1692,11 @@ class BaseTracer(ABC):
 
         # Seed path(s)
         if tx_hash:
-            transfer_result = await _call_tool("token_transfers", {
-                "tx_hash": tx_hash,
-                "blockchain_name": chain
-            })
-            transfer = self._parse_transfer(transfer_result, token_id=token_id_hint)
-
-            # Fallback for native transfers (ETH/TRX/BTC): token_transfers returns
-            # nothing, so use get_transaction with the known victim_address.
-            if not transfer or not transfer.get("from") or not transfer.get("to"):
-                if victim_address:
-                    logger.info("token_transfers empty for seed tx; falling back to get_transaction (native transfer)")
-                    tx_result = await _call_tool("get_transaction", {
-                        "address": victim_address,
-                        "tx_hash": tx_hash,
-                        "blockchain_name": chain,
-                        "token_id": 0,
-                        "path": "0",
-                    })
-                    tx_data = tx_result.get("data", {}) if isinstance(tx_result, dict) else {}
-                    if isinstance(tx_data, list) and tx_data:
-                        tx_data = tx_data[0]
-                    if isinstance(tx_data, dict) and tx_data:
-                        inp = tx_data.get("input") or tx_data.get("inputs")
-                        out = tx_data.get("output") or tx_data.get("outputs")
-                        # Handle both account-model (dict) and UTXO-model (list)
-                        from_addr_fb = None
-                        to_addr_fb = None
-                        inp_riskscore = None
-                        out_riskscore = None
-                        out_owner = None
-
-                        if isinstance(inp, dict):
-                            from_addr_fb = inp.get("address")
-                            inp_riskscore = inp.get("riskscore")
-                        elif isinstance(inp, list) and inp:
-                            first_inp = inp[0] if isinstance(inp[0], dict) else {}
-                            from_addr_fb = first_inp.get("address")
-                            inp_riskscore = first_inp.get("riskscore")
-
-                        if isinstance(out, dict):
-                            to_addr_fb = out.get("address")
-                            out_riskscore = out.get("riskscore")
-                            out_owner = out.get("owner")
-                        elif isinstance(out, list) and out:
-                            first_out = out[0] if isinstance(out[0], dict) else {}
-                            to_addr_fb = first_out.get("address")
-                            out_riskscore = first_out.get("riskscore")
-                            out_owner = first_out.get("owner")
-
-                        if not from_addr_fb:
-                            from_addr_fb = tx_data.get("from") or tx_data.get("sender")
-                        if not to_addr_fb:
-                            to_addr_fb = tx_data.get("to") or tx_data.get("recipient")
-
-                        transfer = {
-                            "from": from_addr_fb,
-                            "to": to_addr_fb,
-                            "amount": tx_data.get("amount", 0.0),
-                            "block_time": tx_data.get("block_time"),
-                            "token_id": tx_data.get("token_id", 0),
-                            "output_owner": out_owner,
-                            "input_riskscore": inp_riskscore,
-                            "output_riskscore": out_riskscore,
-                        }
-
+            transfer = await _resolve_transfer(
+                tx_hash, chain,
+                address_hint=victim_address,
+                token_id_val=token_id_hint,
+            )
             if not transfer or not transfer.get("from") or not transfer.get("to"):
                 raise RuntimeError("Unable to extract theft transfer details from tx_hash")
 
@@ -1689,7 +1743,7 @@ class BaseTracer(ABC):
             })
 
             self._collect_token_transfer_data(
-                json.dumps(self._compact_tool_result("token_transfers", transfer_result), ensure_ascii=False),
+                json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                 {"tx_hash": tx_hash, "blockchain_name": chain},
                 all_txs_map,
                 risk_map,
@@ -1760,11 +1814,12 @@ class BaseTracer(ABC):
 
             seen_recipients: set = set()
             for idx, sel_hash in enumerate(selected_hashes):
-                transfer_result = await _call_tool("token_transfers", {
-                    "tx_hash": sel_hash,
-                    "blockchain_name": chain
-                })
-                transfer = self._parse_transfer(transfer_result, expected_from=victim_address, token_id=token_id_hint)
+                transfer = await _resolve_transfer(
+                    sel_hash, chain,
+                    address_hint=victim_address,
+                    token_id_val=token_id_hint,
+                    expected_from=victim_address,
+                )
                 if not transfer or not transfer.get("to"):
                     continue
                 to_addr = transfer["to"]
@@ -1808,7 +1863,7 @@ class BaseTracer(ABC):
                 })
 
                 self._collect_token_transfer_data(
-                    json.dumps(self._compact_tool_result("token_transfers", transfer_result), ensure_ascii=False),
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                     {"tx_hash": sel_hash, "blockchain_name": chain},
                     all_txs_map,
                     risk_map,
@@ -2238,11 +2293,12 @@ class BaseTracer(ABC):
             for idx, sel_hash in enumerate(selected_hashes):
                 if sel_hash in path_seen_hashes.get(job.path_id, set()):
                     continue
-                transfer_result = await _call_tool("token_transfers", {
-                    "tx_hash": sel_hash,
-                    "blockchain_name": job.chain
-                })
-                transfer = self._parse_transfer(transfer_result, expected_from=job.current_address, token_id=job.token_id)
+                transfer = await _resolve_transfer(
+                    sel_hash, job.chain,
+                    address_hint=job.current_address,
+                    token_id_val=job.token_id,
+                    expected_from=job.current_address,
+                )
                 if not transfer or not transfer.get("to"):
                     continue
                 to_addr = transfer["to"]
@@ -2291,7 +2347,7 @@ class BaseTracer(ABC):
                 })
 
                 self._collect_token_transfer_data(
-                    json.dumps(self._compact_tool_result("token_transfers", transfer_result), ensure_ascii=False),
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                     {"tx_hash": sel_hash, "blockchain_name": job.chain},
                     all_txs_map,
                     risk_map,

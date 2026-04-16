@@ -14,17 +14,27 @@ You will receive:
 - `owner_hint` (object | null) optional owner info from token_transfers output
 
 ## Classification Rules
-Use `get_address.data.owner` (name, slug, subtype) and `get_extra_address_info.data.services.use_platform`:
+
+There are two signal sources with different strengths:
+- **Strong signal (owner)**: `get_address.data.owner` (name, slug, subtype) and `owner_hint` — these confirm who **owns** the address.
+- **Weak signal (services)**: `get_extra_address_info.data.services.use_platform` — this only means the address has **interacted with** a platform, NOT that it belongs to that platform.
+
+### Keyword matching
 - Mixer keywords: mixer, tornado, blender, sinbad → `role=unidentified_service`, `terminal=true`
 - OTC keywords: otc → `role=otc_service`, `terminal=false` (OTC-like entities are NOT terminal; tracing continues through them)
-- Exchange keywords: exchange, binance, coinbase, kraken, okx, huobi, kucoin, bybit, gate, bitfinex, mxc, gate.io, poloniex → `role=cex_deposit`, `terminal=true`
-- Bridge keywords: bridge, layerzero, stargate, wormhole, allbridge, synapse, hop, multichain, across, router, bridgers → `role=bridge_service`, `terminal=true`
-- DEX keywords: dex, swap, uniswap, sushiswap, pancakeswap, curve → `role=dex_service`, `terminal=true`
+- Exchange keywords: exchange, binance, coinbase, kraken, okx, huobi, kucoin, bybit, gate, bitfinex, mxc, gate.io, poloniex → `role=cex_deposit`
+- Bridge keywords: bridge, layerzero, stargate, wormhole, allbridge, synapse, hop, multichain, across, router, bridgers → `role=bridge_service`
+- DEX keywords: dex, swap, uniswap, sushiswap, pancakeswap, curve → `role=dex_service`
 - Otherwise: `role=intermediate`, `terminal=false`
 
-**Important**: Only match keywords against owner identity fields (name, slug, subtype) and service platform names. Do NOT match against risk signal names, annotations, or other metadata.
+### Terminal decision
+- If a keyword match comes from the **owner** field (strong signal) → `terminal=true`
+- If a keyword match comes **only** from `services.use_platform` (weak signal) → `terminal=false` — the address used that platform but is not owned by it; tracing must continue.
+- Mixers are always terminal regardless of signal source.
 
-If risk score > 0.75, add label "High Risk" but do not mark terminal unless above rules match.
+**Important**: Only match keywords against owner identity fields (name, slug, subtype), owner_hint, and service platform names. Do NOT match against risk signal names, annotations, or other metadata.
+
+If risk score > 0.75, add label "High Risk" but do not mark terminal unless the above owner-based rules match.
 
 ## Output (JSON only)
 Return:

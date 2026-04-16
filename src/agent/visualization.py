@@ -119,22 +119,21 @@ def _compute_positions(nodes: set[str], edges: list[tuple[str, str]], victim_add
 
     # Assign Coordinates
     positions = {}
-    X_GAP = 350
-    Y_GAP = 120
+    X_START = 17.5
+    Y_BASELINE = 25
+    X_GAP = 235
+    Y_GAP = 90
 
     for level, level_nodes in levels.items():
-        # Sort nodes by weight (descending), then name
-        # Heavier nodes (more volume) appear at the top -> or Center?
-        # Standard flow often puts main line in middle or top.
-        # Let's do Descending Weight -> Top to Bottom.
         level_nodes.sort(key=lambda n: (-node_weights.get(n, 0.0), n))
 
         count = len(level_nodes)
-        start_y = -((count - 1) * Y_GAP) / 2
+        # Centre the column around Y_BASELINE
+        start_y = Y_BASELINE - ((count - 1) * Y_GAP) / 2
 
         for i, node in enumerate(level_nodes):
             positions[node] = {
-                "x": level * X_GAP,
+                "x": X_START + level * X_GAP,
                 "y": start_y + (i * Y_GAP)
             }
 
@@ -200,7 +199,31 @@ def generate_visualization_payload(
             tx_list_inputs.append(norm)
     use_provided_tx_list = bool(tx_list_inputs)
 
+    fiat_rate_by_hash: dict[str, float] = {}
+    for tx in tx_list_inputs:
+        h = tx.get("hash")
+        if h:
+            fiat_rate_by_hash[h] = float(tx.get("fiatRate") or tx.get("fiat_rate") or 1.0)
+
     address_to_entity = {e.address: e for e in trace_result.entities}
+
+    # Build risk-score lookup from txList (more reliable than entity data
+    # which may be 0 for addresses added by the postprocessor).
+    risk_from_txlist: dict[str, float] = {}
+    for tx in tx_list_inputs:
+        for inp in (tx.get("inputs") or []):
+            addr = inp.get("address")
+            rs = inp.get("riskscore")
+            if addr and rs and (rs > risk_from_txlist.get(addr, 0.0)):
+                risk_from_txlist[addr] = float(rs)
+        for out in (tx.get("outputs") or []):
+            addr = out.get("address")
+            rs = out.get("riskscore")
+            if addr and rs and (rs > risk_from_txlist.get(addr, 0.0)):
+                risk_from_txlist[addr] = float(rs)
+
+    # Labels that are meta-annotations, not real owner/service names.
+    _META_LABELS = {"High Risk", "Suspected Perpetrator", "Exchange", "Bridge", "DEX"}
 
     service_comment_map = {}
     ren_counter = 0
@@ -237,32 +260,31 @@ def generate_visualization_payload(
     for path in trace_result.paths:
         all_steps.extend(path.steps)
 
+    # Only keep descriptor mappings from pre-collected txs; positions will
+    # be recomputed from the node layout so we do NOT copy them into txs_output.
     tx_desc_by_hash = {}
     if txs:
-        normalized_txs = []
         for tx in txs:
             norm = dict(tx)
-            chain = _normalize_chain(norm.get("currency"))
-            norm["currency"] = chain
-            token_id = norm.get("token_id")
-            if token_id is None:
-                token_id = norm.get("tokenId")
-            if token_id is not None:
+            chain_n = _normalize_chain(norm.get("currency"))
+            norm["currency"] = chain_n
+            tid = norm.get("token_id")
+            if tid is None:
+                tid = norm.get("tokenId")
+            if tid is not None:
                 try:
-                    token_id = int(token_id)
+                    tid = int(tid)
                 except (ValueError, TypeError):
-                    logger.warning("Could not convert token_id to int in txs: %s", token_id)
-                norm["token_id"] = token_id
+                    logger.warning("Could not convert token_id to int in txs: %s", tid)
+                norm["token_id"] = tid
             desc = norm.get("descriptor")
             if desc:
-                norm["descriptor"] = _normalize_tx_descriptor(desc, chain, token_id)
-            normalized_txs.append(norm)
+                norm["descriptor"] = _normalize_tx_descriptor(desc, chain_n, tid)
             tx_hash = norm.get("hash")
             tx_desc = norm.get("descriptor")
             if tx_hash and tx_desc:
                 tx_desc_by_hash[tx_hash] = tx_desc
-        txs = normalized_txs
-    tx_desc_seen = set(tx_desc_by_hash.values())
+    tx_desc_seen: set[str] = set()
 
     for step in all_steps:
         chain = _normalize_chain(step.chain)
@@ -307,16 +329,19 @@ def generate_visualization_payload(
         pos = positions.get(descriptor, {"x": 0, "y": 0})
         entity = address_to_entity.get(address)
 
-        risk_score = entity.risk_score if entity else 0.0
+        risk_score = (entity.risk_score if entity else 0.0) or risk_from_txlist.get(address, 0.0)
+
         owner = None
         if entity and entity.labels:
-             owner = {
-                 "id": 0,
-                 "name": entity.labels[0],
-                 "slug": entity.labels[0],
-                 "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
-                 "subtype": None
-             }
+            real_labels = [lb for lb in entity.labels if lb not in _META_LABELS]
+            if real_labels:
+                owner = {
+                    "id": 0,
+                    "name": real_labels[0],
+                    "slug": real_labels[0],
+                    "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
+                    "subtype": None
+                }
 
         items.append({
             "address": address,
@@ -351,9 +376,6 @@ def generate_visualization_payload(
     # --- Pass 4: Generate Edges & Txs ---
     # Prepare for autoTxs: map address -> list of (step_index, type, hash, path)
     address_activity = defaultdict(list)
-
-    if txs:
-        txs_output = list(txs)
 
     for i_step, step in enumerate(all_steps):
         chain = _normalize_chain(step.chain)
@@ -401,6 +423,7 @@ def generate_visualization_payload(
             tx_desc_seen.add(tx_desc)
 
         step_amount = step.amount_estimate if step.amount_estimate else None
+        fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0)
 
         connects.append({
             "source": src_desc,
@@ -408,7 +431,7 @@ def generate_visualization_payload(
             "data": {
                 "currency": chain,
                 "amount": step_amount,
-                "fiatRate": 1.0,
+                "fiatRate": fiat_rate,
                 "token_id": token_id,
                 "color": edge_color,
                 "isNew": True,
@@ -422,7 +445,7 @@ def generate_visualization_payload(
             "data": {
                 "currency": chain,
                 "amount": step_amount,
-                "fiatRate": 1.0,
+                "fiatRate": fiat_rate,
                 "token_id": token_id,
                 "color": edge_color,
                 "isNew": True,
@@ -453,7 +476,7 @@ def generate_visualization_payload(
                 "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "hash": step.tx_hash,
-                "fiatRate": 1.0,
+                "fiatRate": fiat_rate,
                 "addressesCount": 2,
                 "amount": int((step.amount_estimate or 0) * 1e6) if chain == 'trx' else step.amount_estimate,
                 "currency": chain,
@@ -471,13 +494,28 @@ def generate_visualization_payload(
 
         if token_id not in currency_info:
             asset_upper = (step.asset or "").upper()
-            _UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8}
+            _UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
+            _CURRENCY_NAMES = {
+                "eth": "Ethereum", "btc": "Bitcoin", "trx": "TRON",
+                "bnb": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
+                "ltc": "Litecoin", "sol": "Solana",
+            }
             unit = _UNIT_MAP.get(chain, 6)
+            is_native = (token_id == 0)
+            if asset_upper == "USDT":
+                name = "Tether USD"
+                symbol = "USDT"
+            elif is_native and chain in _CURRENCY_NAMES:
+                name = _CURRENCY_NAMES[chain]
+                symbol = chain
+            else:
+                name = step.asset or chain
+                symbol = asset_upper if asset_upper else chain
             currency_info[token_id] = {
                 "currency": chain,
                 "issuer": None,
-                "name": "Tether USD" if asset_upper == "USDT" else step.asset,
-                "symbol": asset_upper if asset_upper else step.asset,
+                "name": name,
+                "symbol": symbol,
                 "token_id": token_id,
                 "unit": unit
             }
@@ -529,6 +567,25 @@ def generate_visualization_payload(
         "txs": txs_output
     }
 
+    # --- Ensure terminal (leaf) addresses also get comment labels ---
+    # The trace may stop before classifying the last address; detect leaf
+    # nodes and add them to service_comment_map if missing.
+    terminal_addresses = set()
+    for path in trace_result.paths:
+        if path.steps:
+            terminal_addresses.add(path.steps[-1].to_address)
+
+    for addr in terminal_addresses:
+        if addr in service_comment_map:
+            continue
+        entity = address_to_entity.get(addr)
+        if entity and entity.role in {"victim", "perpetrator"}:
+            continue
+        service_comment_map[addr] = f"«ren»{ren_counter}"
+        ren_counter += 1
+        if entity and entity.role == "intermediate":
+            entity.role = "cex_deposit"
+
     # --- Add role labels as comments (victim/perp/service) ---
     role_labels = {
         "victim": "Victim's address",
@@ -536,7 +593,8 @@ def generate_visualization_payload(
         "bridge_service": "Bridge service",
         "cex_deposit": "Exchange deposit address",
         "otc_service": "OTC service",
-        "unidentified_service": "Suspected unidentified service"
+        "unidentified_service": "Suspected unidentified service",
+        "intermediate": "Destination address",
     }
     for entity in trace_result.entities:
         if entity.address not in service_comment_map:
@@ -545,20 +603,22 @@ def generate_visualization_payload(
         token_id = token_id_map.get((_normalize_chain(entity.chain), (trace_result.case_meta.asset_symbol or "").upper()), 0)
         address_desc = _get_descriptor(entity.address, _normalize_chain(entity.chain), token_id)
         pos = positions.get(address_desc, {"x": 0, "y": 0})
-        label = role_labels.get(entity.role) or (entity.labels[0] if entity.labels else entity.role.replace("_", " ").title())
+        real_labels = [lb for lb in (entity.labels or []) if lb not in _META_LABELS]
+        label = role_labels.get(entity.role) or (real_labels[0] if real_labels else entity.role.replace("_", " ").title())
+        comment_h = 50 if entity.role in {"bridge_service", "cex_deposit", "otc_service", "unidentified_service"} else 35
         comments.append({
             "author": "User",
             "date": time.time(),
             "descriptor": comment_desc,
             "text": label,
             "type": "comment",
-            "width": 126,
-            "height": 50 if entity.role in {"bridge_service", "cex_deposit", "otc_service", "unidentified_service"} else 35,
+            "width": 127,
+            "height": comment_h,
             "isManuallyMoved": True,
             "typeOfComment": "comment",
             "color": "#77869E",
-            "x": pos["x"] + 90,
-            "y": pos["y"] - 80
+            "x": pos["x"] - 43,
+            "y": pos["y"] - 65 if comment_h == 35 else pos["y"] - 80
         })
         connects.append({
             "source": comment_desc,

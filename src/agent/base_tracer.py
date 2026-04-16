@@ -613,6 +613,10 @@ class BaseTracer(ABC):
         return " ".join(parts).lower()
 
     def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> dict[str, Any]:
+        # Strong signal: owner field from get_address or owner_hint from
+        # token_transfers -- these identify who OWNS the address.
+        owner_text = self._extract_identity_texts(owner, None, owner_hint)
+        # Combined with the weaker use_platform signal for context.
         combined = self._extract_identity_texts(owner, services, owner_hint)
 
         def _has_any(text: str, keywords: list[str]) -> bool:
@@ -636,11 +640,17 @@ class BaseTracer(ABC):
         if _has_any(combined, otc_keywords):
             return {"role": "otc_service", "terminal": False, "service_label": "OTC", "protocol": None}
         if _has_any(combined, cex_keywords):
-            return {"role": "cex_deposit", "terminal": True, "service_label": "Exchange", "protocol": None}
+            # Only treat as terminal if the owner field itself matches (strong
+            # signal).  services.use_platform alone just means the address
+            # *interacted* with the exchange -- not that it IS the exchange.
+            is_strong = _has_any(owner_text, cex_keywords)
+            return {"role": "cex_deposit", "terminal": is_strong, "service_label": "Exchange", "protocol": None}
         if _has_any(combined, bridge_keywords):
-            return {"role": "bridge_service", "terminal": True, "service_label": "Bridge", "protocol": None}
+            is_strong = _has_any(owner_text, bridge_keywords)
+            return {"role": "bridge_service", "terminal": is_strong, "service_label": "Bridge", "protocol": None}
         if _has_any(combined, dex_keywords):
-            return {"role": "dex_service", "terminal": True, "service_label": "DEX", "protocol": None}
+            is_strong = _has_any(owner_text, dex_keywords)
+            return {"role": "dex_service", "terminal": is_strong, "service_label": "DEX", "protocol": None}
 
         return {"role": "intermediate", "terminal": False, "service_label": None, "protocol": None}
 
@@ -2143,6 +2153,7 @@ class BaseTracer(ABC):
                             f"{fifo_ledger.tolerance*100:.1f}% tolerance). Stopping further attribution."
                         ),
                     })
+                logger.info("Path %s stopped at %s (hop %d): cap exceeded", job.path_id, self._format_address(job.current_address), job.hop_index)
                 processed_paths += 1
                 continue
 
@@ -2150,12 +2161,14 @@ class BaseTracer(ABC):
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 if paths[job.path_id]["stop_reason"] is None:
                     paths[job.path_id]["stop_reason"] = "Max hop limit reached"
+                logger.info("Path %s stopped at %s (hop %d): max hops", job.path_id, self._format_address(job.current_address), job.hop_index)
                 processed_paths += 1
                 continue
 
             if job.current_address in path_seen_addresses.get(job.path_id, set()):
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
+                logger.info("Path %s stopped at %s (hop %d): loop detected", job.path_id, self._format_address(job.current_address), job.hop_index)
                 processed_paths += 1
                 continue
 
@@ -2164,6 +2177,7 @@ class BaseTracer(ABC):
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 if paths[job.path_id]["stop_reason"] is None:
                     paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of stolen value"
+                logger.info("Path %s stopped at %s (hop %d): dust amount (%.2f)", job.path_id, self._format_address(job.current_address), job.hop_index, job.attributed_amount)
                 processed_paths += 1
                 continue
 
@@ -2253,11 +2267,23 @@ class BaseTracer(ABC):
             if risk_score and risk_score > 0.75 and "High Risk" not in labels:
                 labels.append("High Risk")
 
-            if job.hop_index == 1 and role == "intermediate" and not heuristic.get("terminal"):
-                # First hop with no identity → suspect perpetrator
+            if job.hop_index == 1 and not owner and not heuristic.get("terminal"):
+                # First hop with no confirmed owner → suspect perpetrator.
+                # Weak signals (e.g. use_platform) don't count as identity.
                 role = "perpetrator"
                 if "Suspected Perpetrator" not in labels:
                     labels.append("Suspected Perpetrator")
+
+            # Early-hop safeguard: don't terminate at addresses that have no
+            # confirmed owner in the first few hops.  The heuristic may flag
+            # an address as terminal from a weak use_platform signal alone.
+            if terminal and job.hop_index <= 3 and not owner:
+                logger.info(
+                    "Overriding terminal=True for unowned address %s at hop %d (role=%s)",
+                    self._format_address(job.current_address), job.hop_index, role,
+                )
+                terminal = False
+                stop_reason = None
 
             _ensure_entity(job.current_address, role, risk_score, labels=labels, notes=notes)
 
@@ -2385,6 +2411,11 @@ class BaseTracer(ABC):
             if terminal:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = stop_reason or "Reached terminal entity"
+                logger.info(
+                    "Path %s stopped at %s (hop %d): %s | terminal=%s, role=%s, owner=%s",
+                    job.path_id, self._format_address(job.current_address), job.hop_index,
+                    stop_reason, terminal, role, owner,
+                )
                 processed_paths += 1
                 continue
 
@@ -2404,9 +2435,25 @@ class BaseTracer(ABC):
                     job.incoming_time,
                     0,
                 )
+            # Retry with wider time window (5 min earlier) in case the
+            # original filter was too tight for near-instant relays.
+            if not data_list and job.incoming_time:
+                wider_time = (
+                    job.incoming_time - 300
+                    if isinstance(job.incoming_time, (int, float))
+                    else job.incoming_time
+                )
+                logger.info("No outgoing txs, retrying with wider time window for %s", self._format_address(job.current_address))
+                data_list = await _fetch_outgoing_txs(
+                    job.current_address,
+                    job.chain,
+                    wider_time,
+                    job.token_id,
+                )
             if not data_list:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
+                logger.info("Path %s stopped at %s (hop %d): dead end — no outgoing txs", job.path_id, self._format_address(job.current_address), job.hop_index)
                 processed_paths += 1
                 continue
 
@@ -2610,6 +2657,7 @@ class BaseTracer(ABC):
             if not took_step:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
+                logger.info("Path %s stopped at %s (hop %d): no new transactions after selection", job.path_id, self._format_address(job.current_address), job.hop_index)
                 processed_paths += 1
 
         # Set termination reasons for any remaining paths

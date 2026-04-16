@@ -357,6 +357,7 @@ class BaseTracer(ABC):
         # Result storage for post-trace access
         self.last_txs: list[dict[str, Any]] = []
         self.last_tx_list: list[dict[str, Any]] = []
+        self.last_address_info: dict[str, dict[str, Any]] = {}
 
     # ─── Abstract methods (implemented by subclasses) ─────────────────────────
 
@@ -1990,7 +1991,7 @@ class BaseTracer(ABC):
                 })
 
                 self._collect_token_transfer_data(
-                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to"), "owner": transfer.get("output_owner")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                     {"tx_hash": tx_hash, "blockchain_name": chain},
                     all_txs_map,
                     risk_map,
@@ -2110,7 +2111,7 @@ class BaseTracer(ABC):
                 })
 
                 self._collect_token_transfer_data(
-                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to"), "owner": transfer.get("output_owner")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                     {"tx_hash": sel_hash, "blockchain_name": chain},
                     all_txs_map,
                     risk_map,
@@ -2211,6 +2212,14 @@ class BaseTracer(ABC):
 
             risk_score = self._extract_risk_score(get_addr_result)
             risk_map[job.current_address] = risk_score
+
+            # Store raw get_address data for visualization addressInfo
+            try:
+                _addr_data = get_addr_result.get("data", {}) if isinstance(get_addr_result, dict) else {}
+                if _addr_data and job.chain:
+                    self.last_address_info.setdefault(job.current_address, {})[_normalize_chain(job.chain)] = _addr_data
+            except Exception:
+                pass
 
             owner = None
             services = {}
@@ -2631,7 +2640,7 @@ class BaseTracer(ABC):
                 })
 
                 self._collect_token_transfer_data(
-                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
+                    json.dumps({"data": [{"input": {"address": transfer.get("from")}, "output": {"address": transfer.get("to"), "owner": transfer.get("output_owner")}, "amount": transfer.get("amount", 0), "block_time": transfer.get("block_time"), "token_id": transfer.get("token_id", 0)}]}, ensure_ascii=False),
                     {"tx_hash": sel_hash, "blockchain_name": job.chain},
                     all_txs_map,
                     risk_map,
@@ -2775,16 +2784,25 @@ class BaseTracer(ABC):
                     if riskscore_to == 0.0 and isinstance(output_data, dict):
                         riskscore_to = float(output_data.get("riskscore") or 0.0)
 
+                    output_owner = output_data.get("owner") if isinstance(output_data, dict) else None
+                    input_owner = input_data.get("owner") if isinstance(input_data, dict) else None
+
                     amount_val = float(amount_raw) if amount_raw is not None else 0.0
                     if amount_val == 0.0 and transfer.get("amount_coerced") is not None and chain == "trx":
-                        # Convert coerced amount back to base units for TRX UI helpers.
                         amount_val = float(transfer.get("amount_coerced") or 0.0) * 1e6
 
                     fiat_rate = transfer.get("fiat_rate") or transfer.get("fiatRate") or 1.0
 
+                    out_entry: dict[str, Any] = {"address": to_addr, "riskscore": riskscore_to}
+                    if output_owner:
+                        out_entry["owner"] = output_owner
+                    inp_entry: dict[str, Any] = {"address": from_addr, "riskscore": riskscore_from}
+                    if input_owner:
+                        inp_entry["owner"] = input_owner
+
                     tx_list_collected.append({
-                        "inputs": [{"address": from_addr, "riskscore": riskscore_from}],
-                        "outputs": [{"address": to_addr, "riskscore": riskscore_to}],
+                        "inputs": [inp_entry],
+                        "outputs": [out_entry],
                         "hash": tx_hash,
                         "fiatRate": fiat_rate,
                         "addressesCount": 2,
@@ -3048,7 +3066,8 @@ class BaseTracer(ABC):
         try:
             tx_list = getattr(self, "last_tx_list", None)
             txs = getattr(self, "last_txs", None)
-            viz_payload = generate_visualization_payload(trace_result, tx_list=tx_list, txs=txs)
+            address_info = getattr(self, "last_address_info", None)
+            viz_payload = generate_visualization_payload(trace_result, tx_list=tx_list, txs=txs, address_info=address_info)
         except Exception as exc:
             logger.warning(f"⚠️ Visualization payload generation failed: {exc}")
             return

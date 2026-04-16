@@ -639,7 +639,7 @@ function MessageBubble({
             <div className="space-y-2">
               {message.continuationOptions.map((opt, idx) => (
                 <button
-                  key={opt.address}
+                  key={`${opt.address}-${idx}`}
                   onClick={() => onQuickAction(`continue ${idx + 1}`)}
                   className="w-full flex items-center justify-between p-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-left transition-colors group"
                 >

@@ -117,18 +117,17 @@ def _compute_positions(nodes: set[str], edges: list[tuple[str, str]], victim_add
     for node, level in visited.items():
         levels[level].append(node)
 
-    # Assign Coordinates
+    # Assign Coordinates — wide spacing so nodes don't overlap visually
     positions = {}
-    X_START = 17.5
-    Y_BASELINE = 25
-    X_GAP = 235
-    Y_GAP = 90
+    X_START = 353.5
+    Y_BASELINE = 311.25
+    X_GAP = 571
+    Y_GAP = 185
 
     for level, level_nodes in levels.items():
         level_nodes.sort(key=lambda n: (-node_weights.get(n, 0.0), n))
 
         count = len(level_nodes)
-        # Centre the column around Y_BASELINE
         start_y = Y_BASELINE - ((count - 1) * Y_GAP) / 2
 
         for i, node in enumerate(level_nodes):
@@ -163,7 +162,8 @@ def generate_visualization_payload(
     trace_result: TraceResult,
     title: str | None = None,
     tx_list: list[dict[str, Any]] | None = None,
-    txs: list[dict[str, Any]] | None = None
+    txs: list[dict[str, Any]] | None = None,
+    address_info: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Generate visualization payload from TraceResult.
@@ -207,20 +207,38 @@ def generate_visualization_payload(
 
     address_to_entity = {e.address: e for e in trace_result.entities}
 
-    # Build risk-score lookup from txList (more reliable than entity data
-    # which may be 0 for addresses added by the postprocessor).
+    # Build risk-score and owner lookups from txList (more reliable than
+    # entity data which may be 0/empty for addresses added by the postprocessor).
     risk_from_txlist: dict[str, float] = {}
+    owner_from_txlist: dict[str, dict] = {}
     for tx in tx_list_inputs:
         for inp in (tx.get("inputs") or []):
             addr = inp.get("address")
             rs = inp.get("riskscore")
             if addr and rs and (rs > risk_from_txlist.get(addr, 0.0)):
                 risk_from_txlist[addr] = float(rs)
+            if addr and inp.get("owner") and addr not in owner_from_txlist:
+                owner_from_txlist[addr] = inp["owner"]
         for out in (tx.get("outputs") or []):
             addr = out.get("address")
             rs = out.get("riskscore")
             if addr and rs and (rs > risk_from_txlist.get(addr, 0.0)):
                 risk_from_txlist[addr] = float(rs)
+            if addr and out.get("owner") and addr not in owner_from_txlist:
+                owner_from_txlist[addr] = out["owner"]
+
+    # Build additional owner lookups from addressInfo (get_address API results)
+    address_info_data = address_info or {}
+    for addr, chains_data in address_info_data.items():
+        if addr in owner_from_txlist:
+            continue
+        for _chain_key, chain_data in (chains_data.items() if isinstance(chains_data, dict) else []):
+            if not isinstance(chain_data, dict):
+                continue
+            ai_owner = chain_data.get("owner")
+            if ai_owner and isinstance(ai_owner, dict) and ai_owner.get("name"):
+                owner_from_txlist[addr] = ai_owner
+                break
 
     # Labels that are meta-annotations, not real owner/service names.
     _META_LABELS = {"High Risk", "Suspected Perpetrator", "Exchange", "Bridge", "DEX"}
@@ -255,10 +273,17 @@ def generate_visualization_payload(
     def get_node_descriptor(address: str, chain: str, token_id: int) -> str:
         return _get_descriptor(address, chain, token_id)
 
-    # We need to collect all steps to build graph
+    # Collect unique steps across all paths.  Paths share common prefixes so
+    # the same (from, to, tx_hash) triple can appear many times; we keep only
+    # the first occurrence to avoid duplicate edges in the visualization.
+    _step_keys_seen: set[tuple[str, str, str]] = set()
     all_steps = []
     for path in trace_result.paths:
-        all_steps.extend(path.steps)
+        for step in path.steps:
+            key = (step.from_address, step.to_address, step.tx_hash or "")
+            if key not in _step_keys_seen:
+                _step_keys_seen.add(key)
+                all_steps.append(step)
 
     # Only keep descriptor mappings from pre-collected txs; positions will
     # be recomputed from the node layout so we do NOT copy them into txs_output.
@@ -342,6 +367,18 @@ def generate_visualization_payload(
                     "type": "exchange_licensed" if "exchange" in (entity.role or "") else "unknown",
                     "subtype": None
                 }
+        if not owner and address in owner_from_txlist:
+            txl_owner = owner_from_txlist[address]
+            if isinstance(txl_owner, dict):
+                owner = {
+                    "id": txl_owner.get("id", 0),
+                    "name": txl_owner.get("name", ""),
+                    "slug": txl_owner.get("slug", txl_owner.get("name", "")),
+                    "type": txl_owner.get("type", "unknown"),
+                    "subtype": txl_owner.get("subtype"),
+                }
+            elif isinstance(txl_owner, str) and txl_owner:
+                owner = {"id": 0, "name": txl_owner, "slug": txl_owner, "type": "unknown", "subtype": None}
 
         items.append({
             "address": address,
@@ -356,7 +393,7 @@ def generate_visualization_payload(
                 "type": "address"
             },
             "type": "address",
-            "isManuallyMoved": True
+            "isManuallyMoved": False
         })
         added_descriptors.add(descriptor)
 
@@ -398,10 +435,7 @@ def generate_visualization_payload(
         tx_desc = tx_desc_by_hash.get(step.tx_hash) or f"{tx_hash}-{chain}-{token_id}-{i_step}"
 
         mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
-        mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
-        y_offset = -40 if i_step % 2 == 0 else 40
-        if src_desc == tgt_desc:
-            y_offset = 0
+        mid_y = src_pos["y"]
 
         _UTXO_CHAINS = {"btc", "bch", "ltc"}
         is_utxo = chain in _UTXO_CHAINS
@@ -412,28 +446,29 @@ def generate_visualization_payload(
             txs_output.append({
                 "currency": chain,
                 "descriptor": tx_desc,
-                "hash": step.tx_hash,
+                "hash": tx_hash,
                 "token_id": token_id,
                 "x": mid_x,
-                "y": mid_y + y_offset,
+                "y": mid_y,
                 "color": edge_color,
                 "path": tx_path,
                 "type": tx_type
             })
             tx_desc_seen.add(tx_desc)
 
-        step_amount = step.amount_estimate if step.amount_estimate else None
-        fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0)
+        step_amount = step.amount_estimate or 0
+        fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0) if step.tx_hash else 1.0
 
         connects.append({
             "source": src_desc,
             "target": tx_desc,
             "data": {
                 "currency": chain,
-                "amount": step_amount,
+                "amount": None,
                 "fiatRate": fiat_rate,
                 "token_id": token_id,
                 "color": edge_color,
+                "type": "straight",
                 "isNew": True,
                 "isNeedReverse": False,
                 "hovered": False
@@ -444,10 +479,11 @@ def generate_visualization_payload(
             "target": tgt_desc,
             "data": {
                 "currency": chain,
-                "amount": step_amount,
+                "amount": None,
                 "fiatRate": fiat_rate,
                 "token_id": token_id,
                 "color": edge_color,
+                "type": "straight",
                 "isNew": True,
                 "isNeedReverse": False,
                 "hovered": False
@@ -604,46 +640,69 @@ def generate_visualization_payload(
         address_desc = _get_descriptor(entity.address, _normalize_chain(entity.chain), token_id)
         pos = positions.get(address_desc, {"x": 0, "y": 0})
         real_labels = [lb for lb in (entity.labels or []) if lb not in _META_LABELS]
-        label = role_labels.get(entity.role) or (real_labels[0] if real_labels else entity.role.replace("_", " ").title())
-        comment_h = 50 if entity.role in {"bridge_service", "cex_deposit", "otc_service", "unidentified_service"} else 35
+        # Prefer owner name from txList (e.g. "n.exchange") over generic role label
+        txl_owner = owner_from_txlist.get(entity.address)
+        owner_name = None
+        if txl_owner:
+            owner_name = txl_owner.get("name") if isinstance(txl_owner, dict) else str(txl_owner) if txl_owner else None
+        if not owner_name and real_labels:
+            owner_name = real_labels[0]
+
+        if owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}:
+            role_suffix = role_labels.get(entity.role, "")
+            label = f"{owner_name}\n{role_suffix}" if role_suffix else owner_name
+        else:
+            label = role_labels.get(entity.role) or (owner_name if owner_name else entity.role.replace("_", " ").title())
+        has_owner_prefix = owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}
+        line_count = label.count("\n") + 1
+        if line_count >= 3 or (has_owner_prefix and line_count >= 2):
+            comment_h = 65
+        elif line_count == 2 or entity.role in {"bridge_service", "cex_deposit", "otc_service", "unidentified_service"}:
+            comment_h = 50
+        else:
+            comment_h = 35
+        comment_w = 136
+        comment_x = pos["x"] - comment_w - 18
+        comment_y = pos["y"] - comment_h / 2.0
         comments.append({
             "author": "User",
             "date": time.time(),
             "descriptor": comment_desc,
             "text": label,
             "type": "comment",
-            "width": 127,
+            "width": comment_w,
             "height": comment_h,
-            "isManuallyMoved": True,
+            "isManuallyMoved": False,
             "typeOfComment": "comment",
             "color": "#77869E",
-            "x": pos["x"] - 43,
-            "y": pos["y"] - 65 if comment_h == 35 else pos["y"] - 80
+            "x": comment_x,
+            "y": comment_y
         })
         connects.append({
             "source": comment_desc,
             "target": address_desc,
             "data": {
                 "color": "#C2C6CE",
-                "type": "smoothstep",
+                "type": "straight",
                 "hovered": False
             }
         })
 
-    # Hardcoded helpers from example
     helpers = {
         "isConnectionBasedMode": False,
         "isMergedTxMode": False,
         "isFiatMode": False,
         "isShowDate": False,
         "isHelperLinesDisabled": False,
+        "bridgeHistory": [],
+        "addressInfo": address_info_data if address_info_data else {},
         "labels": [],
         "blockList": [],
         "autoTxs": auto_txs,
         "interactionTxsStatsList": {},
         "commentSettings": {
             "defaultType": "comment",
-            "defaultLineType": "smoothstep",
+            "defaultLineType": "straight",
             "defaultCommentColor": "#77869E",
             "defaultTxCommentColor": "#C2C6CE",
             "defaultSymbol": "$"

@@ -2219,7 +2219,7 @@ class BaseTracer(ABC):
             try:
                 _addr_data = get_addr_result.get("data", {}) if isinstance(get_addr_result, dict) else {}
                 if _addr_data and job.chain:
-                    self.last_address_info.setdefault(job.current_address, {})[_normalize_chain(job.chain)] = _addr_data
+                    self.last_address_info.setdefault(job.current_address, {})[self._normalize_chain(job.chain)] = _addr_data
             except Exception:
                 pass
 

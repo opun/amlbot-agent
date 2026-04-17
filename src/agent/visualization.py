@@ -543,7 +543,6 @@ def generate_visualization_payload(
             })
             tx_desc_seen.add(tx_desc)
 
-        step_amount = step.amount_estimate or 0
         fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0) if step.tx_hash else 1.0
 
         connects.append({

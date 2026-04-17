@@ -21,7 +21,10 @@ load_dotenv()
 
 import os
 
-from agents import gen_trace_id, trace
+from agents import gen_trace_id, set_tracing_disabled, trace
+
+if os.getenv("AGENT_DISABLE_OPENAI_TRACING", "").lower() in ("1", "true", "yes"):
+    set_tracing_disabled(True)
 from agents.mcp import MCPServerStdio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -1281,11 +1284,13 @@ async def health():
 def main():
     """Run the API server."""
     import uvicorn
+
+    reload = os.getenv("AGENT_RELOAD", "true").lower() in ("1", "true", "yes")
     uvicorn.run(
         "agent.api:app",
         host="0.0.0.0",
         port=8000,
-        reload=True
+        reload=reload,
     )
 
 

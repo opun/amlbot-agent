@@ -43,6 +43,7 @@ if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("[TRACE] %(message)s"))
     logger.addHandler(handler)
+logger.propagate = False
 
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ TOOL_TIMEOUT_SLOW = 60
 _SLOW_TOOLS = frozenset({"all_txs", "bridge_analyze"})
 MAX_TOOL_CALLS_PER_TURN = 6
 MAX_TOKEN_TRANSFERS_PER_TURN = 2
+MAX_TX_LIST = 500
 
 
 @dataclass
@@ -407,7 +409,8 @@ class BaseTracer(ABC):
         import httpx
         http_client = httpx.AsyncClient(
             timeout=Timeout(OPENAI_TIMEOUT, connect=OPENAI_CONNECT_TIMEOUT),
-            limits=Limits(max_keepalive_connections=0, max_connections=10),
+            limits=Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
+            http2=True,
         )
         self.openai_client = AsyncOpenAI(http_client=http_client, max_retries=1)
 
@@ -1120,6 +1123,8 @@ class BaseTracer(ABC):
         risk_map: dict[str, float] = {}
         txs_seen: set = set()
         empty_tool_call_turns = 0
+        _parallel_tool_calls = os.getenv("AGENT_PARALLEL_TOOL_CALLS", "").lower() in ("1", "true", "yes")
+        _tool_call_sem = asyncio.Semaphore(max(1, int(os.getenv("AGENT_MAX_CONCURRENT_TOOLS", "3"))))
 
         try:
             for turn in range(max_turns):
@@ -1267,53 +1272,69 @@ class BaseTracer(ABC):
 
                     all_txs_results: list[dict[str, Any]] = []
 
-                    for tool_call in tool_calls:
-                        tool_name = tool_call.function.name
-                        raw_args = tool_call.function.arguments
+                    async def _execute_tool_call(tc):
+                        tool_name = tc.function.name
+                        raw_args = tc.function.arguments
                         try:
                             arguments = json.loads(raw_args) if raw_args else {}
                         except Exception:
                             logger.warning(f"Invalid tool arguments for {tool_name}. Using empty args.")
                             arguments = {}
 
+                        tool_input = json.dumps(arguments, ensure_ascii=False)
+                        tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
+                        _to = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
+
+                        async def _run_tool_body() -> tuple[str, dict[str, Any], str]:
+                            with function_span(tool_name, input=tool_input) as tool_span:
+                                try:
+                                    result = await asyncio.wait_for(
+                                        self.execute_tool(tool_name, arguments),
+                                        timeout=_to
+                                    )
+                                    compact = self._compact_tool_result(tool_name, result)
+                                    tool_result = json.dumps(compact, ensure_ascii=False)
+                                    try:
+                                        if hasattr(tool_span, "span_data"):
+                                            tool_span.span_data.output = compact
+                                    except Exception:
+                                        pass
+                                except TimeoutError:
+                                    logger.error(f"❌ Tool timeout: {tool_name} (limit={_to}s)")
+                                    tool_result = json.dumps({"error": "tool_timeout", "tool": tool_name})
+                                    try:
+                                        tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
+                                        tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
+                                    except Exception:
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"❌ Tool error: {e}")
+                                    tool_result = json.dumps({"error": str(e), "tool": tool_name})
+                                    try:
+                                        tool_span.set_error({"message": str(e), "data": {"tool": tool_name}})
+                                        tool_span.span_data.output = {"error": str(e), "tool": tool_name}
+                                    except Exception:
+                                        pass
+                                return tool_name, arguments, tool_result
+
+                        if _parallel_tool_calls:
+                            async with _tool_call_sem:
+                                tn, args, tres = await _run_tool_body()
+                        else:
+                            tn, args, tres = await _run_tool_body()
+                        return tc, tn, args, tres
+
+                    if _parallel_tool_calls and len(tool_calls) > 1:
+                        tool_outcomes = await asyncio.gather(*(_execute_tool_call(tc) for tc in tool_calls))
+                    else:
+                        tool_outcomes = [await _execute_tool_call(tc) for tc in tool_calls]
+
+                    for tool_call, tool_name, arguments, tool_result in tool_outcomes:
                         if tool_name == "get_address" and "address" in arguments:
                             addr = arguments["address"]
                             if addr not in addresses_traced:
                                 addresses_traced.append(addr)
                                 logger.info(f"📍 Hop {len(addresses_traced)}: Analyzing {self._format_address(addr)}")
-
-                        tool_input = json.dumps(arguments, ensure_ascii=False)
-                        tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
-                        _to = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
-                        with function_span(tool_name, input=tool_input) as tool_span:
-                            try:
-                                result = await asyncio.wait_for(
-                                    self.execute_tool(tool_name, arguments),
-                                    timeout=_to
-                                )
-                                compact = self._compact_tool_result(tool_name, result)
-                                tool_result = json.dumps(compact, ensure_ascii=False)
-                                try:
-                                    if hasattr(tool_span, "span_data"):
-                                        tool_span.span_data.output = compact
-                                except Exception:
-                                    pass
-                            except TimeoutError:
-                                logger.error(f"❌ Tool timeout: {tool_name} (limit={_to}s)")
-                                tool_result = json.dumps({"error": "tool_timeout", "tool": tool_name})
-                                try:
-                                    tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
-                                    tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
-                                except Exception:
-                                    pass
-                            except Exception as e:
-                                logger.error(f"❌ Tool error: {e}")
-                                tool_result = json.dumps({"error": str(e), "tool": tool_name})
-                                try:
-                                    tool_span.set_error({"message": str(e), "data": {"tool": tool_name}})
-                                    tool_span.span_data.output = {"error": str(e), "tool": tool_name}
-                                except Exception:
-                                    pass
 
                         messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_result})
 
@@ -1394,8 +1415,9 @@ class BaseTracer(ABC):
         finally:
             self.last_txs = txs_collected
             self.last_tx_list = tx_list_collected
-            logger.info(f"TXS_ARRAY={json.dumps(self.last_txs, ensure_ascii=False)}")
-            logger.info(f"TXLIST_ARRAY={json.dumps(self.last_tx_list, ensure_ascii=False)}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("TXS_ARRAY=%s", json.dumps(self.last_txs, ensure_ascii=False))
+                logger.debug("TXLIST_ARRAY=%s", json.dumps(self.last_tx_list, ensure_ascii=False))
 
     async def _run_agentic_trace(
         self, payload: dict[str, Any],
@@ -2322,109 +2344,35 @@ class BaseTracer(ABC):
         def _completed_paths_count() -> int:
             return sum(1 for p in paths.values() if p.get("stop_reason"))
 
-        while hop_scheduler.should_continue(_completed_paths_count()):
-            job = hop_scheduler.pop()
-
-            # Cap exhaustion no longer short-circuits processing. We emit a
-            # one-time annotation and let paths keep traversing so the
-            # visualization/classifier still lands on real CEX/mixer/bridge
-            # terminals; FIFOLedger.claim_terminal already clamps attribution
-            # to zero once cap is reached, so accounting stays correct.
-            if fifo_ledger.cap_exceeded and not cap_annotation_emitted:
-                cap_annotation_emitted = True
-                annotations.append({
-                    "id": f"ann-{len(annotations)+1}",
-                    "label": "Cap Reached",
-                    "related_addresses": [job.current_address],
-                    "related_steps": [f"{job.path_id}:{max(len(paths[job.path_id]['steps'])-1, 0)}"],
-                    "text": (
-                        f"Total traced amount ({fifo_ledger.total_traced:,.2f}) reached the cap "
-                        f"({fifo_ledger.cap:,.2f} = stolen {fifo_ledger.stolen_amount:,.2f} + "
-                        f"{fifo_ledger.tolerance*100:.1f}% tolerance). Further hops are classified "
-                        f"for labeling but not attributed."
-                    ),
-                })
-                logger.info(
-                    "FIFO cap reached at %s (hop %d, path %s); continuing traversal with zero-attribution terminals",
-                    self._format_address(job.current_address), job.hop_index, job.path_id,
-                )
-
-            if job.hop_index > max_hops:
-                fifo_ledger.claim_terminal(job.attributed_amount)
-                if paths[job.path_id]["stop_reason"] is None:
-                    paths[job.path_id]["stop_reason"] = "Max hop limit reached"
-                logger.info("Path %s stopped at %s (hop %d): max hops", job.path_id, self._format_address(job.current_address), job.hop_index)
-                continue
-
-            if job.current_address in path_seen_addresses.get(job.path_id, set()):
-                fifo_ledger.claim_terminal(job.attributed_amount)
-                paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
-                logger.info("Path %s stopped at %s (hop %d): loop detected", job.path_id, self._format_address(job.current_address), job.hop_index)
-                continue
-
-            # Dust check: compare ``attributed_amount`` to the *same-unit*
-            # reference ``job.incoming_amount``. Historically this check used
-            # ``fifo_ledger.stolen_amount * 0.001`` as the threshold, but
-            # that is brittle: the account-model theft setup (``tx_hash``
-            # branch) pulls ``theft_amount`` from ``token_transfers`` (raw
-            # gwei-scale when the response lacks ``amount_coerced``), while
-            # every downstream hop pulls amounts from ``all_txs`` via
-            # ``amount_coerced`` (decimal ETH). When the scales disagree
-            # (e.g. stolen=9.4e10 gwei vs. per-mule attribution=10.0 ETH),
-            # the check silently terminates every high-value branch with
-            # ``"Dust amount"`` and the visualization mis-labels legitimate
-            # intermediate hops as terminal endpoints.
-            #
-            # ``job.incoming_amount`` is derived from the *same* code path
-            # that produced ``job.attributed_amount`` (the parent hop's
-            # ``step_amount`` / FIFO attribution), so the two always share a
-            # scale.  A path is dust when the theft-share contribution is
-            # less than 0.1% of what actually flowed into this hop — the
-            # classic "mixer dilution" semantic, now unit-safe.
-            incoming_ref = float(job.incoming_amount or 0.0)
-            dust_threshold = incoming_ref * 0.001 if incoming_ref > 0 else 0.0
-            if dust_threshold > 0 and job.attributed_amount < dust_threshold:
-                fifo_ledger.claim_terminal(job.attributed_amount)
-                if paths[job.path_id]["stop_reason"] is None:
-                    paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of hop inflow"
-                logger.info(
-                    "Path %s stopped at %s (hop %d): dust (attributed=%.6g, incoming=%.6g)",
-                    job.path_id,
-                    self._format_address(job.current_address),
-                    job.hop_index,
-                    job.attributed_amount,
-                    incoming_ref,
-                )
-                continue
-
-            path_seen_addresses.setdefault(job.path_id, set()).add(job.current_address)
-
-            if on_progress:
-                await on_progress(f"Analyzing hop {job.hop_index + 1}...")
-
-            # Phase 1: parallel address info + speculative bridge probe for early hops
-            _coros: list = [
+        async def _agentic_phase1_for_job(job_local: HopJob):
+            _coros_pf: list = [
                 _call_tool("get_address", {
-                    "blockchain_name": job.chain,
-                    "address": job.current_address,
+                    "blockchain_name": job_local.chain,
+                    "address": job_local.current_address,
                 }),
                 _call_tool("get_extra_address_info", {
-                    "address": job.current_address,
-                    "asset": job.asset,
+                    "address": job_local.current_address,
+                    "asset": job_local.asset,
                 }),
             ]
-            _early_bridge = bool(job.incoming_tx_hash and job.hop_index <= 3)
-            if _early_bridge:
-                _coros.append(_call_tool("bridge_analyze", {
-                    "chain": job.chain,
-                    "tx_hash": job.incoming_tx_hash,
+            _eb_pf = bool(job_local.incoming_tx_hash and job_local.hop_index <= 3)
+            if _eb_pf:
+                _coros_pf.append(_call_tool("bridge_analyze", {
+                    "chain": job_local.chain,
+                    "tx_hash": job_local.incoming_tx_hash,
                 }))
+            _p1_pf = await asyncio.gather(*_coros_pf)
+            if _eb_pf:
+                return _p1_pf[0], _p1_pf[1], _p1_pf[2]
+            return _p1_pf[0], _p1_pf[1], None
 
-            _phase1 = await asyncio.gather(*_coros)
-            get_addr_result = _phase1[0]
-            get_extra_result = _phase1[1]
-            _early_bridge_result = _phase1[2] if _early_bridge else None
-
+        async def _agentic_hop_after_phase1(
+            job: HopJob,
+            get_addr_result: Any,
+            get_extra_result: Any,
+            _early_bridge_result: Any | None,
+        ) -> None:
+            nonlocal path_counter
             risk_score = self._extract_risk_score(get_addr_result)
             risk_map[job.current_address] = risk_score
 
@@ -2618,7 +2566,7 @@ class BaseTracer(ABC):
                         attributed_amount=bridge_raw_attr,
                     ))
                     # Continue on destination chain
-                    continue
+                    return
 
                 # If tool hints at bridge but no destination, annotate and fall through
                 # to outgoing-tx search instead of stopping immediately.
@@ -2640,7 +2588,7 @@ class BaseTracer(ABC):
                     job.path_id, self._format_address(job.current_address), job.hop_index,
                     stop_reason, terminal, role, owner,
                 )
-                continue
+                return
 
             # Find next outgoing transactions (chronological accumulation)
             data_list = await _fetch_outgoing_txs(
@@ -2683,7 +2631,7 @@ class BaseTracer(ABC):
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
                 logger.info("Path %s stopped at %s (hop %d): dead end — no outgoing txs", job.path_id, self._format_address(job.current_address), job.hop_index)
-                continue
+                return
 
             # --- OTC-like behavioral analysis (deferred, reuses data_list) ---
             if _run_otc:
@@ -2928,6 +2876,81 @@ class BaseTracer(ABC):
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
                 logger.info("Path %s stopped at %s (hop %d): no new transactions after selection", job.path_id, self._format_address(job.current_address), job.hop_index)
 
+        _parallel_hops = os.getenv("AGENT_PARALLEL_HOPS", "").lower() in ("1", "true", "yes")
+        _hop_fanout = max(1, min(16, int(os.getenv("AGENT_HOP_FANOUT", "3"))))
+
+        while hop_scheduler.should_continue(_completed_paths_count()):
+            _batch_size = min(_hop_fanout, len(hop_scheduler)) if _parallel_hops else 1
+            job_batch = [hop_scheduler.pop() for _ in range(_batch_size)]
+            survivors: list[HopJob] = []
+            for job in job_batch:
+                if fifo_ledger.cap_exceeded and not cap_annotation_emitted:
+                    cap_annotation_emitted = True
+                    annotations.append({
+                        "id": f"ann-{len(annotations)+1}",
+                        "label": "Cap Reached",
+                        "related_addresses": [job.current_address],
+                        "related_steps": [f"{job.path_id}:{max(len(paths[job.path_id]['steps'])-1, 0)}"],
+                        "text": (
+                            f"Total traced amount ({fifo_ledger.total_traced:,.2f}) reached the cap "
+                            f"({fifo_ledger.cap:,.2f} = stolen {fifo_ledger.stolen_amount:,.2f} + "
+                            f"{fifo_ledger.tolerance*100:.1f}% tolerance). Further hops are classified "
+                            f"for labeling but not attributed."
+                        ),
+                    })
+                    logger.info(
+                        "FIFO cap reached at %s (hop %d, path %s); continuing traversal with zero-attribution terminals",
+                        self._format_address(job.current_address), job.hop_index, job.path_id,
+                    )
+
+                if job.hop_index > max_hops:
+                    fifo_ledger.claim_terminal(job.attributed_amount)
+                    if paths[job.path_id]["stop_reason"] is None:
+                        paths[job.path_id]["stop_reason"] = "Max hop limit reached"
+                    logger.info("Path %s stopped at %s (hop %d): max hops", job.path_id, self._format_address(job.current_address), job.hop_index)
+                    continue
+
+                if job.current_address in path_seen_addresses.get(job.path_id, set()):
+                    fifo_ledger.claim_terminal(job.attributed_amount)
+                    paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
+                    logger.info("Path %s stopped at %s (hop %d): loop detected", job.path_id, self._format_address(job.current_address), job.hop_index)
+                    continue
+
+                incoming_ref = float(job.incoming_amount or 0.0)
+                dust_threshold = incoming_ref * 0.001 if incoming_ref > 0 else 0.0
+                if dust_threshold > 0 and job.attributed_amount < dust_threshold:
+                    fifo_ledger.claim_terminal(job.attributed_amount)
+                    if paths[job.path_id]["stop_reason"] is None:
+                        paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of hop inflow"
+                    logger.info(
+                        "Path %s stopped at %s (hop %d): dust (attributed=%.6g, incoming=%.6g)",
+                        job.path_id,
+                        self._format_address(job.current_address),
+                        job.hop_index,
+                        job.attributed_amount,
+                        incoming_ref,
+                    )
+                    continue
+
+                path_seen_addresses.setdefault(job.path_id, set()).add(job.current_address)
+
+                if on_progress:
+                    await on_progress(f"Analyzing hop {job.hop_index + 1}...")
+
+                survivors.append(job)
+
+            if not survivors:
+                continue
+
+            if _parallel_hops and len(survivors) > 1:
+                _p1_list = await asyncio.gather(*(_agentic_phase1_for_job(j) for j in survivors))
+            else:
+                _p1_list = [await _agentic_phase1_for_job(j) for j in survivors]
+
+            for job, _p1 in zip(survivors, _p1_list, strict=True):
+                _ga, _ge, _ebr = _p1
+                await _agentic_hop_after_phase1(job, _ga, _ge, _ebr)
+
         if hop_scheduler.exhausted and len(hop_scheduler) > 0:
             logger.warning(
                 "HopScheduler hit iteration safety net (%d iters, %d jobs still queued). "
@@ -2971,8 +2994,9 @@ class BaseTracer(ABC):
 
         self.last_txs = txs_collected
         self.last_tx_list = tx_list_collected
-        logger.info(f"TXS_ARRAY={json.dumps(self.last_txs, ensure_ascii=False)}")
-        logger.info(f"TXLIST_ARRAY={json.dumps(self.last_tx_list, ensure_ascii=False)}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("TXS_ARRAY=%s", json.dumps(self.last_txs, ensure_ascii=False))
+            logger.debug("TXLIST_ARRAY=%s", json.dumps(self.last_tx_list, ensure_ascii=False))
 
         return {
             "case_meta": case_meta,
@@ -2996,6 +3020,8 @@ class BaseTracer(ABC):
     ):
         """Helper to collect token transfer data for visualization."""
         try:
+            if len(tx_list_collected) >= MAX_TX_LIST:
+                return
             parsed = json.loads(tool_result)
             transfers = parsed.get("data", []) if isinstance(parsed, dict) else []
             if isinstance(transfers, list) and transfers:
@@ -3100,6 +3126,8 @@ class BaseTracer(ABC):
         """
         if not utxo_outputs or tx_hash in txs_seen:
             return
+        if len(tx_list_collected) >= MAX_TX_LIST:
+            return
 
         first = utxo_outputs[0]
         from_addr = first.get("from")
@@ -3193,6 +3221,24 @@ class BaseTracer(ABC):
             "path": None,
             "type": "tx"
         })
+
+    @staticmethod
+    def _cap_visualization_tx_lists(
+        tx_list: list[dict[str, Any]] | None,
+        txs: list[dict[str, Any]] | None,
+        max_items: int = MAX_TX_LIST,
+    ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+        """Shrink tx_list/txs before building the visualization payload (MCP POST size)."""
+        if not tx_list or len(tx_list) <= max_items:
+            return tx_list, txs
+        ordered = sorted(
+            tx_list,
+            key=lambda e: int(e.get("date") or e.get("poolTime") or 0),
+        )
+        capped_list = ordered[-max_items:]
+        keep_hashes = {e.get("hash") for e in capped_list if e.get("hash")}
+        txs_out = [t for t in (txs or []) if t.get("hash") in keep_hashes][:max_items] if txs else txs
+        return capped_list, txs_out
 
     async def _retry_json_response(self, messages: list, message) -> dict[str, Any]:
         """Retry to get valid JSON from LLM after failed parse."""
@@ -3333,6 +3379,10 @@ class BaseTracer(ABC):
             tx_list = getattr(self, "last_tx_list", None)
             txs = getattr(self, "last_txs", None)
             address_info = getattr(self, "last_address_info", None)
+            tx_list, txs = self._cap_visualization_tx_lists(
+                tx_list if isinstance(tx_list, list) else None,
+                txs if isinstance(txs, list) else None,
+            )
             viz_payload = generate_visualization_payload(trace_result, tx_list=tx_list, txs=txs, address_info=address_info)
         except Exception as exc:
             logger.warning(f"⚠️ Visualization payload generation failed: {exc}")

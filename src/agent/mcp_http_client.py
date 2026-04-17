@@ -24,7 +24,11 @@ class VisualizationAPIClient:
         """
         self.api_url = (api_url or os.getenv("NEXT_PUBLIC_API_URL", "")).rstrip('/')
         self.user_id = user_id
-        self.client = httpx.AsyncClient(timeout=60.0)
+        self.client = httpx.AsyncClient(
+            timeout=60.0,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=32, keepalive_expiry=30.0),
+            http2=True,
+        )
 
     async def save_visualization(self, visualization_data: dict[str, Any]) -> dict[str, Any]:
         """
@@ -144,7 +148,11 @@ class MCPHTTPClient:
     def __init__(self, mcp_server_url: str, user_id: str):
         self.mcp_server_url = mcp_server_url.rstrip('/')
         self.user_id = user_id
-        self.client = httpx.AsyncClient(timeout=60.0)
+        self.client = httpx.AsyncClient(
+            timeout=60.0,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=32, keepalive_expiry=30.0),
+            http2=True,
+        )
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool via HTTP."""

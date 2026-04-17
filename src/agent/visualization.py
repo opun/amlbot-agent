@@ -342,8 +342,14 @@ def generate_visualization_payload(
             token_id = tx.get("tokenId")
             if token_id is None:
                 token_id = tx.get("token_id")
-            if chain and token_id is not None and asset_hint:
-                token_id_map[(chain, asset_hint)] = int(token_id)
+            if chain and token_id is not None:
+                tid = int(token_id)
+                if tid == 0:
+                    native_sym = chain.upper()
+                    token_id_map.setdefault((chain, native_sym), 0)
+                    token_id_map.setdefault((chain, ""), 0)
+                elif asset_hint:
+                    token_id_map[(chain, asset_hint)] = tid
     node_weights = defaultdict(float) # descriptor -> total volume
 
     def get_node_descriptor(address: str, chain: str, token_id: int) -> str:
@@ -587,12 +593,14 @@ def generate_visualization_payload(
              "path": "0"
         })
 
-        # Populate helper txList if not provided
-        if not use_provided_tx_list:
+        # Add txList entry when not provided, or when hash is synthetic
+        # (synthetic hashes won't exist in a provided txList)
+        is_synthetic_hash = step.tx_hash is None
+        if not use_provided_tx_list or is_synthetic_hash:
             tx_list_inputs.append({
                 "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
-                "hash": step.tx_hash,
+                "hash": tx_hash,
                 "fiatRate": fiat_rate,
                 "addressesCount": 2,
                 "amount": int((step.amount_estimate or 0) * 1e6) if chain == 'trx' else step.amount_estimate,
@@ -602,7 +610,6 @@ def generate_visualization_payload(
                 "date": _get_timestamp(step.time),
                 "path": tx_path,
                 "type": tx_type,
-                # Extra metadata for UI
                 "reasoning": step.reasoning,
                 "step_type": step.step_type,
                 "service_label": step.service_label,

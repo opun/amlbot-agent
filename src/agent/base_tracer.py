@@ -885,6 +885,7 @@ class BaseTracer(ABC):
         txs: list[dict[str, Any]],
         incoming_amount: float | None,
         chain: str,
+        asset: str | None = None,
         max_select: int = 25,
     ) -> list[str]:
         """Chronological accumulation per trace_orchestrator.md."""
@@ -905,7 +906,7 @@ class BaseTracer(ABC):
             amount_val = item.get("amount_coerced")
             if amount_val is None:
                 amount_val = item.get("amount")
-            amount_norm = self._normalize_amount(amount_val or 0.0, chain)
+            amount_norm = self._normalize_amount(amount_val or 0.0, chain, asset)
             accumulated += amount_norm
             selected.append(tx_hash)
 
@@ -1337,7 +1338,7 @@ class BaseTracer(ABC):
         token_id_hint = payload.get("token_id_hint") or 0
 
         max_hops = 12
-        max_paths = 3
+        max_paths = 10
 
         entities: dict[str, dict[str, Any]] = {}
         annotations: list[dict[str, Any]] = []
@@ -1436,7 +1437,8 @@ class BaseTracer(ABC):
             paths[path_id]["steps"].append(step)
             tx_hash = step.get("tx_hash")
             if tx_hash:
-                path_seen_hashes.setdefault(path_id, set()).add(tx_hash)
+                edge_key = (tx_hash, step.get("from", ""), step.get("to", ""))
+                path_seen_hashes.setdefault(path_id, set()).add(edge_key)
 
         def _copy_path(new_id: str, from_id: str):
             paths[new_id] = {
@@ -2038,7 +2040,7 @@ class BaseTracer(ABC):
                 date_ts,
                 token_id_hint,
             )
-            selected_hashes = self._accumulate_hashes(data_list, None, chain)
+            selected_hashes = self._accumulate_hashes(data_list, None, chain, asset=asset)
             used_accumulation = bool(selected_hashes)
             if not selected_hashes and data_list:
                 # Fallback to selector only if accumulation can't decide
@@ -2559,7 +2561,7 @@ class BaseTracer(ABC):
                     logger.warning(f"OTC-like analysis failed for {job.current_address}: {exc}")
 
             selector_result = None
-            selected_hashes = self._accumulate_hashes(data_list, job.incoming_amount, job.chain)
+            selected_hashes = self._accumulate_hashes(data_list, job.incoming_amount, job.chain, asset=job.asset)
             used_accumulation = bool(selected_hashes)
             if not selected_hashes and data_list:
                 selector_context = {
@@ -2584,8 +2586,6 @@ class BaseTracer(ABC):
             took_step = False
             seen_recipients: set = set()
             for idx, sel_hash in enumerate(selected_hashes):
-                if sel_hash in path_seen_hashes.get(job.path_id, set()):
-                    continue
                 transfer = await _resolve_transfer(
                     sel_hash, job.chain,
                     address_hint=job.current_address,
@@ -2595,6 +2595,9 @@ class BaseTracer(ABC):
                 if not transfer or not transfer.get("to"):
                     continue
                 to_addr = transfer["to"]
+                edge_key = (sel_hash, job.current_address, to_addr)
+                if edge_key in path_seen_hashes.get(job.path_id, set()):
+                    continue
                 if to_addr in seen_recipients:
                     continue
                 seen_recipients.add(to_addr)

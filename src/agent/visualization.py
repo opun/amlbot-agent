@@ -61,80 +61,156 @@ def _is_service(entity: Entity | None) -> bool:
     SERVICE_ROLES = {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}
     return entity.role in SERVICE_ROLES
 
-def _compute_positions(nodes: set[str], edges: list[tuple[str, str]], victim_address: str, service_descriptors: set[str], node_weights: dict[str, float]) -> dict[str, dict[str, float]]:
+def _compute_positions(
+    nodes: set[str],
+    edges: list[tuple[str, str]],
+    victim_address: str,
+    service_descriptors: set[str],
+    node_weights: dict[str, float],
+    all_steps: list | None = None,
+    get_node_descriptor_fn=None,
+    token_id_map: dict | None = None,
+) -> dict[str, dict[str, float]]:
     """
-    Compute x,y positions for nodes using a layered graph layout.
-    Nodes are sorted vertically by their weight (volume) to highlight important paths.
+    Each trace-path becomes a horizontal row:
+        item ─ tx ─ item ─ tx ─ item   (same Y, equal X spacing)
+    Rows are stacked top-to-bottom for each fan-out.
+
+    When two paths share a prefix (e.g. victim → perpetrator) the shared
+    nodes keep their first-assigned position so the layout stays compact.
     """
-    # Build adjacency list
-    adj = defaultdict(list)
-    in_degree = defaultdict(int)
-
-    for u, v in edges:
-        adj[u].append(v)
-        in_degree[v] += 1
-        if u not in in_degree:
-            in_degree[u] = 0
-
-    # Identify roots
-    queue = deque()
-    visited = {} # descriptor -> level
-
-    roots = []
-    # prioritizing victim
-    for n in nodes:
-        if victim_address.lower() in n.lower() and n not in service_descriptors:
-             roots.append(n)
-
-    if not roots:
-         # Highest value nodes as fallback roots? or 0-degree
-         roots = [n for n in nodes if in_degree[n] == 0]
-    if not roots and nodes:
-         roots = [next(iter(nodes))]
-
-    for root in roots:
-        queue.append((root, 0))
-        visited[root] = 0
-
-    # BFS for Layer Assignment
-    max_level = 0
-    while queue:
-        u, level = queue.popleft()
-        max_level = max(max_level, level)
-
-        for v in adj[u]:
-            if v not in visited:
-                visited[v] = level + 1
-                queue.append((v, level + 1))
-
-    # Handle disconnected
-    leftovers = [n for n in nodes if n not in visited]
-    for n in leftovers:
-        visited[n] = 0
-
-    # Group by Level
-    levels = defaultdict(list)
-    for node, level in visited.items():
-        levels[level].append(node)
-
-    # Assign Coordinates — wide spacing so nodes don't overlap visually
-    positions = {}
     X_START = 353.5
-    Y_BASELINE = 311.25
-    X_GAP = 571
-    Y_GAP = 185
+    X_ITEM_GAP = 571          # distance between two adjacent address nodes
+    Y_ROW_GAP = 185           # vertical distance between rows
 
-    for level, level_nodes in levels.items():
-        level_nodes.sort(key=lambda n: (-node_weights.get(n, 0.0), n))
+    positions: dict[str, dict[str, float]] = {}
+    current_row_y = X_START   # first row y (reusing X_START value for symmetry)
 
-        count = len(level_nodes)
-        start_y = Y_BASELINE - ((count - 1) * Y_GAP) / 2
+    if not all_steps or get_node_descriptor_fn is None:
+        # Fallback: simple BFS layout if steps aren't provided
+        adj: dict[str, list[str]] = defaultdict(list)
+        in_deg: dict[str, int] = defaultdict(int)
+        for u, v in edges:
+            adj[u].append(v)
+            in_deg[v] += 1
+            if u not in in_deg:
+                in_deg[u] = 0
 
-        for i, node in enumerate(level_nodes):
-            positions[node] = {
-                "x": X_START + level * X_GAP,
-                "y": start_y + (i * Y_GAP)
-            }
+        roots = [n for n in nodes if victim_address.lower() in n.lower() and n not in service_descriptors]
+        if not roots:
+            roots = [n for n in nodes if in_deg[n] == 0]
+        if not roots and nodes:
+            roots = [next(iter(nodes))]
+
+        visited: dict[str, int] = {}
+        queue: deque[tuple[str, int]] = deque()
+        for r in roots:
+            queue.append((r, 0))
+            visited[r] = 0
+        while queue:
+            u, lvl = queue.popleft()
+            for v in adj[u]:
+                if v not in visited:
+                    visited[v] = lvl + 1
+                    queue.append((v, lvl + 1))
+        for n in nodes:
+            if n not in visited:
+                visited[n] = 0
+
+        levels: dict[int, list[str]] = defaultdict(list)
+        for n, lvl in visited.items():
+            levels[lvl].append(n)
+        y = X_START
+        for lvl in sorted(levels):
+            lvl_nodes = sorted(levels[lvl], key=lambda n: (-node_weights.get(n, 0.0), n))
+            for nd in lvl_nodes:
+                positions[nd] = {"x": X_START + lvl * X_ITEM_GAP, "y": y}
+                y += Y_ROW_GAP
+        return positions
+
+    # ── Build unique paths as address-descriptor chains ──────────────
+    # Gather chains of address descriptors per path
+    path_chains: list[list[str]] = []
+    seen_chain_tuples: set[tuple[str, ...]] = set()
+
+    _tid_map = token_id_map or {}
+
+    def _resolve_token_id(asset: str, chain: str) -> int:
+        return _tid_map.get((chain, asset), _get_token_id(asset, chain))
+
+    # Build adjacency among address descriptors from the steps
+    adj_steps: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for idx, step in enumerate(all_steps):
+        chain = _normalize_chain(step.chain)
+        asset = (step.asset or "").upper()
+        token_id = _resolve_token_id(asset, chain)
+        src = get_node_descriptor_fn(step.from_address, chain, token_id)
+        dst = get_node_descriptor_fn(step.to_address, chain, token_id)
+        adj_steps[src].append((dst, idx))
+
+    # Find roots (nodes with no incoming from other steps)
+    all_srcs: set[str] = set()
+    all_dsts: set[str] = set()
+    for step in all_steps:
+        chain = _normalize_chain(step.chain)
+        asset = (step.asset or "").upper()
+        token_id = _resolve_token_id(asset, chain)
+        all_srcs.add(get_node_descriptor_fn(step.from_address, chain, token_id))
+        all_dsts.add(get_node_descriptor_fn(step.to_address, chain, token_id))
+
+    root_descs = all_srcs - all_dsts
+    if not root_descs:
+        root_descs = {next(iter(all_srcs))} if all_srcs else set()
+
+    # DFS from roots to enumerate all leaf-ending paths (cycle-safe)
+    def _dfs(node: str, current_path: list[str], visited_in_path: set[str]):
+        nexts = adj_steps.get(node, [])
+        unvisited = [(dst, idx) for dst, idx in nexts if dst not in visited_in_path]
+        if not unvisited:
+            if len(current_path) > 1:
+                chain_tuple = tuple(current_path)
+                if chain_tuple not in seen_chain_tuples:
+                    seen_chain_tuples.add(chain_tuple)
+                    path_chains.append(list(current_path))
+            return
+        for dst, _idx in unvisited:
+            _dfs(dst, current_path + [dst], visited_in_path | {dst})
+
+    for root in sorted(root_descs):
+        _dfs(root, [root], {root})
+
+    # Sort paths: longer / higher-weight paths first
+    def _path_weight(p: list[str]) -> float:
+        return sum(node_weights.get(n, 0.0) for n in p)
+    path_chains.sort(key=lambda p: (-_path_weight(p), -len(p)))
+
+    # ── Assign positions row by row ──────────────────────────────────
+    # First path gets the baseline row; every subsequent path that
+    # introduces new nodes gets a fresh row so labels never overlap.
+    current_row_y = 311.25
+    is_first_path = True
+
+    for chain_descs in path_chains:
+        new_descs = [d for d in chain_descs if d not in positions]
+        if not new_descs:
+            continue  # entire path already positioned
+
+        if not is_first_path:
+            current_row_y += Y_ROW_GAP
+        is_first_path = False
+
+        for col, desc in enumerate(chain_descs):
+            if desc not in positions:
+                positions[desc] = {
+                    "x": X_START + col * X_ITEM_GAP,
+                    "y": current_row_y,
+                }
+
+    # Position any remaining nodes not reached by path walks
+    for n in nodes:
+        if n not in positions:
+            current_row_y += Y_ROW_GAP
+            positions[n] = {"x": X_START, "y": current_row_y}
 
     return positions
 
@@ -338,7 +414,12 @@ def generate_visualization_payload(
     logger.debug(f"Token ID Map: {token_id_map}")
 
     # --- Pass 2: Compute Layout ---
-    positions = _compute_positions(node_descriptors, edges, trace_result.case_meta.victim_address, service_descriptors, node_weights)
+    positions = _compute_positions(
+        node_descriptors, edges, trace_result.case_meta.victim_address,
+        service_descriptors, node_weights,
+        all_steps=all_steps, get_node_descriptor_fn=get_node_descriptor,
+        token_id_map=token_id_map,
+    )
 
     # --- Pass 3: Generate Items & Comments ---
     added_descriptors = set()
@@ -435,7 +516,7 @@ def generate_visualization_payload(
         tx_desc = tx_desc_by_hash.get(step.tx_hash) or f"{tx_hash}-{chain}-{token_id}-{i_step}"
 
         mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
-        mid_y = src_pos["y"]
+        mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
 
         _UTXO_CHAINS = {"btc", "bch", "ltc"}
         is_utxo = chain in _UTXO_CHAINS
@@ -530,14 +611,22 @@ def generate_visualization_payload(
 
         if token_id not in currency_info:
             asset_upper = (step.asset or "").upper()
-            _UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
+            _NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
+            _TOKEN_UNIT_MAP = {
+                "USDT": 6, "USDC": 6, "DAI": 18, "BUSD": 18,
+                "WETH": 18, "WBTC": 8, "LINK": 18, "UNI": 18,
+                "AAVE": 18, "GRT": 18, "MTL": 8,
+            }
             _CURRENCY_NAMES = {
                 "eth": "Ethereum", "btc": "Bitcoin", "trx": "TRON",
                 "bnb": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
                 "ltc": "Litecoin", "sol": "Solana",
             }
-            unit = _UNIT_MAP.get(chain, 6)
             is_native = (token_id == 0)
+            if is_native:
+                unit = _NATIVE_UNIT_MAP.get(chain, 6)
+            else:
+                unit = _TOKEN_UNIT_MAP.get(asset_upper, 6)
             if asset_upper == "USDT":
                 name = "Tether USD"
                 symbol = "USDT"
@@ -662,8 +751,8 @@ def generate_visualization_payload(
         else:
             comment_h = 35
         comment_w = 136
-        comment_x = pos["x"] - comment_w - 18
-        comment_y = pos["y"] - comment_h / 2.0
+        comment_x = pos["x"] - comment_w / 2.0
+        comment_y = pos["y"] - comment_h - 25
         comments.append({
             "author": "User",
             "date": time.time(),

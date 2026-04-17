@@ -700,13 +700,23 @@ def generate_visualization_payload(
 
     # --- Ensure terminal (leaf) addresses also get comment labels ---
     # The trace may stop before classifying the last address; detect leaf
-    # nodes and add them to service_comment_map if missing.
-    terminal_addresses = set()
+    # nodes and add them to service_comment_map so the visualization still
+    # marks the endpoint. Historically this block forcibly re-labelled every
+    # intermediate leaf as ``cex_deposit`` ("Exchange deposit address"),
+    # which produced false "exchange" claims on plain mule addresses the
+    # classifier never actually identified as a service. We keep the role
+    # honest (``intermediate`` stays ``intermediate``) and instead pick a
+    # comment label based on *why* the path stopped.
+    terminal_stop_reasons: dict[str, str] = {}
     for path in trace_result.paths:
-        if path.steps:
-            terminal_addresses.add(path.steps[-1].to_address)
+        if not path.steps:
+            continue
+        leaf = path.steps[-1].to_address
+        reason = (path.stop_reason or "").strip()
+        if leaf not in terminal_stop_reasons or reason:
+            terminal_stop_reasons[leaf] = reason
 
-    for addr in terminal_addresses:
+    for addr, _reason in terminal_stop_reasons.items():
         if addr in service_comment_map:
             continue
         entity = address_to_entity.get(addr)
@@ -714,8 +724,24 @@ def generate_visualization_payload(
             continue
         service_comment_map[addr] = f"«ren»{ren_counter}"
         ren_counter += 1
-        if entity and entity.role == "intermediate":
-            entity.role = "cex_deposit"
+
+    def _intermediate_label_for(addr: str) -> str:
+        """Pick a human-readable label for a terminal ``intermediate`` node
+        using the path's stop_reason when available."""
+        reason = (terminal_stop_reasons.get(addr) or "").lower()
+        if not reason:
+            return "Destination address"
+        if "dead end" in reason or "no outgoing" in reason:
+            return "Trace endpoint\n(no outflows found)"
+        if "max hop" in reason:
+            return "Trace endpoint\n(hop limit)"
+        if "loop" in reason:
+            return "Trace endpoint\n(loop)"
+        if "cap" in reason:
+            return "Trace endpoint\n(cap reached)"
+        if "dust" in reason:
+            return "Trace endpoint\n(dust amount)"
+        return "Destination address"
 
     # --- Add role labels as comments (victim/perp/service) ---
     role_labels = {
@@ -746,6 +772,10 @@ def generate_visualization_payload(
         if owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}:
             role_suffix = role_labels.get(entity.role, "")
             label = f"{owner_name}\n{role_suffix}" if role_suffix else owner_name
+        elif entity.role == "intermediate" and entity.address in terminal_stop_reasons:
+            # Terminal intermediate: pick a label that reflects *why* the
+            # trace stopped instead of pretending it's a CEX deposit.
+            label = owner_name or _intermediate_label_for(entity.address)
         else:
             label = role_labels.get(entity.role) or (owner_name if owner_name else entity.role.replace("_", " ").title())
         has_owner_prefix = owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}

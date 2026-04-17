@@ -3,6 +3,8 @@ Base Tracer with shared orchestration logic.
 Interface implementations: MCPTracer (local stdio), HTTPTracer (remote HTTP).
 """
 import asyncio
+import heapq
+import itertools
 import json
 import logging
 import os
@@ -65,6 +67,71 @@ class HopJob:
     token_id: int
     hop_index: int
     attributed_amount: float = 0.0  # FIFO-attributed theft-origin share
+
+
+class HopScheduler:
+    """Priority queue + completion-budget scheduler for hop traversal.
+
+    The tracer used to process ``HopJob`` items FIFO and cap the outer loop at
+    ``processed_paths < max_paths``, where ``processed_paths`` was only
+    incremented on terminal/dead-end branches. When a perpetrator split funds
+    across ``>= max_paths`` siblings, dead-end siblings would exhaust the
+    budget before legitimate continuations could reach their hop-3+ terminals
+    (e.g. the real CEX deposit one hop further). That made the tracer stop on
+    intermediate mules and the visualization layer then mislabelled those
+    mules as "Exchange deposit address".
+
+    The scheduler fixes both issues:
+
+    * **Priority order**: larger ``attributed_amount`` is processed first,
+      with ``hop_index`` asc and FIFO tiebreak. High-value branches always
+      reach their terminal before the global cap closes on smaller siblings.
+    * **Completion-based budget**: the outer loop terminates once
+      ``completed_paths >= max_completed`` — continuations do not count
+      against the budget. Combined with a hard ``max_iterations`` safety net
+      to guard against pathological input.
+    """
+
+    def __init__(self, max_completed: int, max_iterations: int | None = None):
+        if max_completed <= 0:
+            raise ValueError("max_completed must be positive")
+        self.max_completed = max_completed
+        self.max_iterations = max_iterations if max_iterations and max_iterations > 0 else max_completed * 64
+        self._heap: list[tuple[float, int, int, HopJob]] = []
+        self._seq = itertools.count()
+        self._iterations = 0
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    @property
+    def iterations(self) -> int:
+        return self._iterations
+
+    @property
+    def exhausted(self) -> bool:
+        """Hard safety net: stop even when ``completed_paths`` hasn't reached the budget."""
+        return self._iterations >= self.max_iterations
+
+    def push(self, job: HopJob) -> None:
+        # Priority key: larger attributed_amount first (negated), then shallower
+        # hop first, then FIFO insertion order. We include seq so that HopJob
+        # instances never need to be comparable with each other.
+        priority = (-float(job.attributed_amount or 0.0), int(job.hop_index), next(self._seq))
+        heapq.heappush(self._heap, (*priority, job))
+
+    def pop(self) -> HopJob:
+        """Pop the highest-priority job. Raises ``IndexError`` if empty."""
+        *_, job = heapq.heappop(self._heap)
+        self._iterations += 1
+        return job
+
+    def should_continue(self, completed_paths: int) -> bool:
+        if not self._heap:
+            return False
+        if self.exhausted:
+            return False
+        return completed_paths < self.max_completed
 
 
 class FIFOLedger:
@@ -888,7 +955,17 @@ class BaseTracer(ABC):
         asset: str | None = None,
         max_select: int = 25,
     ) -> list[str]:
-        """Chronological accumulation per trace_orchestrator.md."""
+        """Chronological accumulation per trace_orchestrator.md.
+
+        Selects outgoing transactions in chronological order until their
+        combined amount covers ``incoming_amount`` (or the max-select cap is
+        reached). We deliberately keep accumulating until we cross the
+        incoming total — any earlier "close enough" shortcut (e.g. the old
+        1.5% gap heuristic) silently drops the next staged payout when the
+        perpetrator splits funds into one big cluster plus a smaller tail
+        (e.g. CEX deposits + a side transfer to a secondary mule address),
+        which then cascades into missing downstream hops.
+        """
         if not txs:
             return []
         if not incoming_amount or incoming_amount <= 0:
@@ -911,9 +988,6 @@ class BaseTracer(ABC):
             selected.append(tx_hash)
 
             if accumulated >= incoming:
-                break
-            gap = (incoming - accumulated) / incoming if incoming else 1.0
-            if gap <= 0.015:
                 break
             if len(selected) >= max_select:
                 break
@@ -1450,7 +1524,18 @@ class BaseTracer(ABC):
             path_seen_addresses[new_id] = set(path_seen_addresses.get(from_id, set()))
             path_seen_hashes[new_id] = set(path_seen_hashes.get(from_id, set()))
 
-        hop_queue: list[HopJob] = []
+        # Scheduler: priority queue keyed by (-attributed_amount, hop_index,
+        # insertion_order). The completion budget is max_paths distinct
+        # *finished* paths — continuations no longer count against the budget,
+        # so high-attribution branches always get a chance to reach their
+        # real CEX/mixer/bridge terminal instead of being starved by
+        # shallower dead-end siblings. A hard iteration safety net
+        # (max_paths * max_hops * 4) guards against pathological fan-out.
+        hop_scheduler = HopScheduler(
+            max_completed=max_paths,
+            max_iterations=max_paths * max_hops * 4,
+        )
+        cap_annotation_emitted = False
 
         def _parse_get_tx_transfer(
             tx_data: dict[str, Any],
@@ -1709,42 +1794,138 @@ class BaseTracer(ABC):
             token_id: int | None,
             max_pages: int = 5,
             page_limit: int = 50,
+            incoming_amount: float | None = None,
+            asset: str | None = None,
         ) -> list[dict[str, Any]]:
-            """Fetch outgoing txs with pagination, ordered by time asc."""
-            all_items: list[dict[str, Any]] = []
-            offset = 0
-            pages = 0
-            while pages < max_pages:
-                filter_obj: dict[str, Any] = {}
-                if incoming_time:
-                    filter_obj["time"] = {">=": incoming_time}
-                if token_id not in (None, 0):
-                    filter_obj["token_id"] = [token_id]
-                filter_arg = filter_obj or None
+            """Fetch outgoing txs with pagination, ordered by time asc.
 
-                result = await _call_tool("all_txs", {
-                    "address": address,
-                    "blockchain_name": chain_name,
-                    "filter": filter_arg,
-                    "limit": page_limit,
-                    "offset": offset,
-                    "direction": "asc",
-                    "order": "time",
-                    "transaction_type": "withdrawal",
-                })
-                data_list = result.get("data", []) if isinstance(result, dict) else []
-                if not data_list:
-                    break
-                for item in data_list:
+            Performs a primary fetch with transaction_type="withdrawal" (which
+            applies a server-side `delta_coerced <= -0.0001` filter). When the
+            returned items' total amount covers less than 70% of
+            `incoming_amount`, a secondary fetch is issued with the
+            `delta_coerced` filter disabled and the results are filtered
+            client-side for outflows.
+
+            Background: DEX swap transactions (e.g. 1inch USDT→DAI) can cause
+            the per-address aggregate `delta_coerced` to be near zero or
+            positive, so the server-side withdrawal filter silently drops
+            them even though the specific token clearly flowed out. The
+            fallback recovers those missing outflows.
+            """
+
+            def _ingest(items: list[dict[str, Any]], bucket: dict[str, dict[str, Any]]) -> None:
+                for item in items:
                     tx_h = item.get("hash")
-                    if tx_h:
-                        all_txs_map[tx_h] = item
-                all_items.extend(data_list)
-                if len(data_list) < page_limit:
-                    break
-                offset += page_limit
-                pages += 1
-            return all_items
+                    if not tx_h:
+                        continue
+                    bucket[tx_h] = item
+                    all_txs_map[tx_h] = item
+
+            async def _paginated_fetch(
+                filter_obj: dict[str, Any],
+                transaction_type: str,
+            ) -> list[dict[str, Any]]:
+                collected: list[dict[str, Any]] = []
+                offset = 0
+                pages = 0
+                while pages < max_pages:
+                    filter_arg = dict(filter_obj) if filter_obj else None
+                    result = await _call_tool("all_txs", {
+                        "address": address,
+                        "blockchain_name": chain_name,
+                        "filter": filter_arg,
+                        "limit": page_limit,
+                        "offset": offset,
+                        "direction": "asc",
+                        "order": "time",
+                        "transaction_type": transaction_type,
+                    })
+                    data_list = result.get("data", []) if isinstance(result, dict) else []
+                    if not data_list:
+                        break
+                    collected.extend(data_list)
+                    if len(data_list) < page_limit:
+                        break
+                    offset += page_limit
+                    pages += 1
+                return collected
+
+            base_filter: dict[str, Any] = {}
+            if incoming_time:
+                base_filter["time"] = {">=": incoming_time}
+            if token_id not in (None, 0):
+                base_filter["token_id"] = [token_id]
+
+            primary_bucket: dict[str, dict[str, Any]] = {}
+            primary_items = await _paginated_fetch(base_filter, "withdrawal")
+            _ingest(primary_items, primary_bucket)
+
+            # Coverage check: only attempt the fallback when we know what we
+            # expected to see and the primary pass fell notably short.
+            coverage_threshold = 0.7
+            need_fallback = False
+            if incoming_amount and incoming_amount > 0:
+                total_primary = 0.0
+                for item in primary_bucket.values():
+                    amt = item.get("amount_coerced")
+                    if amt is None:
+                        amt = item.get("amount")
+                    total_primary += self._normalize_amount(amt or 0.0, chain_name, asset)
+                if total_primary < coverage_threshold * incoming_amount:
+                    need_fallback = True
+                    logger.info(
+                        "Outgoing-tx coverage %.1f%% < %.0f%% for %s (incoming=%.2f, primary=%.2f); "
+                        "retrying without delta_coerced filter",
+                        (total_primary / incoming_amount) * 100,
+                        coverage_threshold * 100,
+                        self._format_address(address),
+                        incoming_amount,
+                        total_primary,
+                    )
+
+            merged: dict[str, dict[str, Any]] = dict(primary_bucket)
+            if need_fallback:
+                # Explicit empty delta_coerced → client.py strips the filter,
+                # so the SAILS backend no longer drops swaps whose aggregate
+                # delta sits near zero.
+                fallback_filter = dict(base_filter)
+                fallback_filter["delta_coerced"] = None
+                fallback_items = await _paginated_fetch(fallback_filter, "all")
+
+                added = 0
+                for item in fallback_items:
+                    tx_h = item.get("hash")
+                    if not tx_h or tx_h in merged:
+                        continue
+                    # Client-side outflow check: keep items where the
+                    # per-token delta is negative. Fall back to including the
+                    # item when delta_coerced is absent so we don't regress on
+                    # native/UTXO responses that lack the field.
+                    delta = item.get("delta_coerced")
+                    try:
+                        delta_f = float(delta) if delta is not None else None
+                    except (TypeError, ValueError):
+                        delta_f = None
+                    if delta_f is not None and delta_f >= 0:
+                        continue
+                    merged[tx_h] = item
+                    all_txs_map[tx_h] = item
+                    added += 1
+                if added:
+                    logger.info(
+                        "Fallback fetch added %d missing outflow(s) for %s",
+                        added,
+                        self._format_address(address),
+                    )
+
+            def _sort_key(item: dict[str, Any]) -> int:
+                bt = item.get("block_time") or item.get("time") or item.get("pool_time") or 0
+                try:
+                    return int(bt)
+                except (TypeError, ValueError):
+                    return 0
+
+            return sorted(merged.values(), key=_sort_key)
 
         def _parse_bridge_info(result: Any) -> dict[str, Any]:
             if not isinstance(result, dict):
@@ -1925,7 +2106,7 @@ class BaseTracer(ABC):
                         "reasoning": f"UTXO output {idx + 1}/{len(utxo_outputs)} from theft transaction.",
                     })
 
-                    hop_queue.append(HopJob(
+                    hop_scheduler.push(HopJob(
                         path_id=path_id,
                         current_address=to_addr,
                         incoming_tx_hash=tx_hash,
@@ -2002,7 +2183,7 @@ class BaseTracer(ABC):
                     txs_seen,
                 )
 
-                hop_queue.append(HopJob(
+                hop_scheduler.push(HopJob(
                     path_id="1",
                     current_address=to_addr,
                     incoming_tx_hash=tx_hash,
@@ -2122,7 +2303,7 @@ class BaseTracer(ABC):
                     txs_seen,
                 )
 
-                hop_queue.append(HopJob(
+                hop_scheduler.push(HopJob(
                     path_id=path_id,
                     current_address=to_addr,
                     incoming_tx_hash=sel_hash,
@@ -2138,50 +2319,82 @@ class BaseTracer(ABC):
         else:
             raise RuntimeError("victim_address or tx_hash is required")
 
-        processed_paths = 0
-        while hop_queue and processed_paths < max_paths:
-            job = hop_queue.pop(0)
+        def _completed_paths_count() -> int:
+            return sum(1 for p in paths.values() if p.get("stop_reason"))
 
-            if fifo_ledger.cap_exceeded:
-                if paths[job.path_id]["stop_reason"] is None:
-                    paths[job.path_id]["stop_reason"] = "Global traced amount cap reached"
-                    annotations.append({
-                        "id": f"ann-{len(annotations)+1}",
-                        "label": "Cap Reached",
-                        "related_addresses": [job.current_address],
-                        "related_steps": [f"{job.path_id}:{len(paths[job.path_id]['steps'])-1}"],
-                        "text": (
-                            f"Total traced amount ({fifo_ledger.total_traced:,.2f}) reached the cap "
-                            f"({fifo_ledger.cap:,.2f} = stolen {fifo_ledger.stolen_amount:,.2f} + "
-                            f"{fifo_ledger.tolerance*100:.1f}% tolerance). Stopping further attribution."
-                        ),
-                    })
-                logger.info("Path %s stopped at %s (hop %d): cap exceeded", job.path_id, self._format_address(job.current_address), job.hop_index)
-                processed_paths += 1
-                continue
+        while hop_scheduler.should_continue(_completed_paths_count()):
+            job = hop_scheduler.pop()
+
+            # Cap exhaustion no longer short-circuits processing. We emit a
+            # one-time annotation and let paths keep traversing so the
+            # visualization/classifier still lands on real CEX/mixer/bridge
+            # terminals; FIFOLedger.claim_terminal already clamps attribution
+            # to zero once cap is reached, so accounting stays correct.
+            if fifo_ledger.cap_exceeded and not cap_annotation_emitted:
+                cap_annotation_emitted = True
+                annotations.append({
+                    "id": f"ann-{len(annotations)+1}",
+                    "label": "Cap Reached",
+                    "related_addresses": [job.current_address],
+                    "related_steps": [f"{job.path_id}:{max(len(paths[job.path_id]['steps'])-1, 0)}"],
+                    "text": (
+                        f"Total traced amount ({fifo_ledger.total_traced:,.2f}) reached the cap "
+                        f"({fifo_ledger.cap:,.2f} = stolen {fifo_ledger.stolen_amount:,.2f} + "
+                        f"{fifo_ledger.tolerance*100:.1f}% tolerance). Further hops are classified "
+                        f"for labeling but not attributed."
+                    ),
+                })
+                logger.info(
+                    "FIFO cap reached at %s (hop %d, path %s); continuing traversal with zero-attribution terminals",
+                    self._format_address(job.current_address), job.hop_index, job.path_id,
+                )
 
             if job.hop_index > max_hops:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 if paths[job.path_id]["stop_reason"] is None:
                     paths[job.path_id]["stop_reason"] = "Max hop limit reached"
                 logger.info("Path %s stopped at %s (hop %d): max hops", job.path_id, self._format_address(job.current_address), job.hop_index)
-                processed_paths += 1
                 continue
 
             if job.current_address in path_seen_addresses.get(job.path_id, set()):
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
                 logger.info("Path %s stopped at %s (hop %d): loop detected", job.path_id, self._format_address(job.current_address), job.hop_index)
-                processed_paths += 1
                 continue
 
-            dust_threshold = fifo_ledger.stolen_amount * 0.001 if fifo_ledger.stolen_amount > 0 else 0
+            # Dust check: compare ``attributed_amount`` to the *same-unit*
+            # reference ``job.incoming_amount``. Historically this check used
+            # ``fifo_ledger.stolen_amount * 0.001`` as the threshold, but
+            # that is brittle: the account-model theft setup (``tx_hash``
+            # branch) pulls ``theft_amount`` from ``token_transfers`` (raw
+            # gwei-scale when the response lacks ``amount_coerced``), while
+            # every downstream hop pulls amounts from ``all_txs`` via
+            # ``amount_coerced`` (decimal ETH). When the scales disagree
+            # (e.g. stolen=9.4e10 gwei vs. per-mule attribution=10.0 ETH),
+            # the check silently terminates every high-value branch with
+            # ``"Dust amount"`` and the visualization mis-labels legitimate
+            # intermediate hops as terminal endpoints.
+            #
+            # ``job.incoming_amount`` is derived from the *same* code path
+            # that produced ``job.attributed_amount`` (the parent hop's
+            # ``step_amount`` / FIFO attribution), so the two always share a
+            # scale.  A path is dust when the theft-share contribution is
+            # less than 0.1% of what actually flowed into this hop — the
+            # classic "mixer dilution" semantic, now unit-safe.
+            incoming_ref = float(job.incoming_amount or 0.0)
+            dust_threshold = incoming_ref * 0.001 if incoming_ref > 0 else 0.0
             if dust_threshold > 0 and job.attributed_amount < dust_threshold:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 if paths[job.path_id]["stop_reason"] is None:
-                    paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of stolen value"
-                logger.info("Path %s stopped at %s (hop %d): dust amount (%.2f)", job.path_id, self._format_address(job.current_address), job.hop_index, job.attributed_amount)
-                processed_paths += 1
+                    paths[job.path_id]["stop_reason"] = "Dust amount — below 0.1% of hop inflow"
+                logger.info(
+                    "Path %s stopped at %s (hop %d): dust (attributed=%.6g, incoming=%.6g)",
+                    job.path_id,
+                    self._format_address(job.current_address),
+                    job.hop_index,
+                    job.attributed_amount,
+                    incoming_ref,
+                )
                 continue
 
             path_seen_addresses.setdefault(job.path_id, set()).add(job.current_address)
@@ -2392,7 +2605,7 @@ class BaseTracer(ABC):
                         fallback=job.token_id,
                     )
 
-                    hop_queue.append(HopJob(
+                    hop_scheduler.push(HopJob(
                         path_id=job.path_id,
                         current_address=dst_address,
                         incoming_tx_hash=dst_tx_hash or job.incoming_tx_hash,
@@ -2427,7 +2640,6 @@ class BaseTracer(ABC):
                     job.path_id, self._format_address(job.current_address), job.hop_index,
                     stop_reason, terminal, role, owner,
                 )
-                processed_paths += 1
                 continue
 
             # Find next outgoing transactions (chronological accumulation)
@@ -2436,6 +2648,8 @@ class BaseTracer(ABC):
                 job.chain,
                 job.incoming_time,
                 job.token_id,
+                incoming_amount=job.incoming_amount,
+                asset=job.asset,
             )
             # If no results with specific token, retry with native token (asset conversion on exchange)
             if not data_list and job.token_id not in (None, 0):
@@ -2445,6 +2659,8 @@ class BaseTracer(ABC):
                     job.chain,
                     job.incoming_time,
                     0,
+                    incoming_amount=job.incoming_amount,
+                    asset=job.asset,
                 )
             # Retry with wider time window (5 min earlier) in case the
             # original filter was too tight for near-instant relays.
@@ -2460,12 +2676,13 @@ class BaseTracer(ABC):
                     job.chain,
                     wider_time,
                     job.token_id,
+                    incoming_amount=job.incoming_amount,
+                    asset=job.asset,
                 )
             if not data_list:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Dead end - no outgoing transactions"
                 logger.info("Path %s stopped at %s (hop %d): dead end — no outgoing txs", job.path_id, self._format_address(job.current_address), job.hop_index)
-                processed_paths += 1
                 continue
 
             # --- OTC-like behavioral analysis (deferred, reuses data_list) ---
@@ -2584,8 +2801,16 @@ class BaseTracer(ABC):
             base_path_id = job.path_id
 
             took_step = False
-            seen_recipients: set = set()
-            for idx, sel_hash in enumerate(selected_hashes):
+            # Track per-recipient state so that multiple outgoing txs from the
+            # same source to the same destination (common for repeated CEX
+            # deposits, staged payouts, etc.) are ALL captured as separate
+            # edges/steps in the graph, while still queueing only a single
+            # downstream HopJob per unique recipient. The queued HopJob's
+            # incoming_amount is aggregated across repeats so the recipient's
+            # outflow accumulation targets the true aggregate inflow.
+            recipient_state: dict[str, dict[str, Any]] = {}
+            used_base_path = False
+            for _idx, sel_hash in enumerate(selected_hashes):
                 transfer = await _resolve_transfer(
                     sel_hash, job.chain,
                     address_hint=job.current_address,
@@ -2598,9 +2823,6 @@ class BaseTracer(ABC):
                 edge_key = (sel_hash, job.current_address, to_addr)
                 if edge_key in path_seen_hashes.get(job.path_id, set()):
                     continue
-                if to_addr in seen_recipients:
-                    continue
-                seen_recipients.add(to_addr)
                 if to_addr in path_seen_addresses.get(job.path_id, set()):
                     continue
                 amount = self._resolve_amount(sel_hash, transfer.get("amount", 0.0), job.chain, all_txs_map, job.asset)
@@ -2617,8 +2839,15 @@ class BaseTracer(ABC):
                 raw_attributed = fifo_ledger.attribute_outflow(job.current_address, step_amount)
                 fifo_ledger.record_inflow(to_addr, step_amount, raw_attributed)
 
-                if idx == 0:
+                existing_state = recipient_state.get(to_addr)
+                if existing_state is not None:
+                    # Repeated send to a recipient we've already recorded this
+                    # hop — reuse its path so repeated txs stack as sibling
+                    # steps on the same branch instead of forking.
+                    path_id = existing_state["path_id"]
+                elif not used_base_path:
                     path_id = base_path_id
+                    used_base_path = True
                 else:
                     path_counter += 1
                     path_id = str(path_counter)
@@ -2652,25 +2881,59 @@ class BaseTracer(ABC):
                     txs_seen,
                 )
 
-                hop_queue.append(HopJob(
-                    path_id=path_id,
-                    current_address=to_addr,
-                    incoming_tx_hash=sel_hash,
-                    incoming_amount=step_amount,
-                    incoming_time=block_time,
-                    chain=job.chain,
-                    asset=job.asset,
-                    token_id=int(token_id or 0),
-                    hop_index=job.hop_index + 1,
-                    attributed_amount=raw_attributed,
-                ))
+                if existing_state is None:
+                    new_job = HopJob(
+                        path_id=path_id,
+                        current_address=to_addr,
+                        incoming_tx_hash=sel_hash,
+                        incoming_amount=step_amount,
+                        incoming_time=block_time,
+                        chain=job.chain,
+                        asset=job.asset,
+                        token_id=int(token_id or 0),
+                        hop_index=job.hop_index + 1,
+                        attributed_amount=raw_attributed,
+                    )
+                    hop_scheduler.push(new_job)
+                    recipient_state[to_addr] = {
+                        "hop_job": new_job,
+                        "path_id": path_id,
+                        "total_amount": step_amount,
+                        "total_attributed": raw_attributed,
+                        "earliest_time": block_time,
+                    }
+                else:
+                    # Aggregate repeat send into the queued HopJob so the
+                    # recipient's outflow accumulation (driven by
+                    # incoming_amount) reflects the real total inflow.
+                    existing_state["total_amount"] += step_amount
+                    existing_state["total_attributed"] += raw_attributed
+                    hop_job = existing_state["hop_job"]
+                    hop_job.incoming_amount = existing_state["total_amount"]
+                    hop_job.attributed_amount = existing_state["total_attributed"]
+                    if block_time is not None:
+                        try:
+                            bt_int = int(block_time)
+                            cur = existing_state["earliest_time"]
+                            cur_int = int(cur) if cur is not None else None
+                            if cur_int is None or bt_int < cur_int:
+                                existing_state["earliest_time"] = block_time
+                                hop_job.incoming_time = block_time
+                        except (TypeError, ValueError):
+                            pass
                 took_step = True
 
             if not took_step:
                 fifo_ledger.claim_terminal(job.attributed_amount)
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
                 logger.info("Path %s stopped at %s (hop %d): no new transactions after selection", job.path_id, self._format_address(job.current_address), job.hop_index)
-                processed_paths += 1
+
+        if hop_scheduler.exhausted and len(hop_scheduler) > 0:
+            logger.warning(
+                "HopScheduler hit iteration safety net (%d iters, %d jobs still queued). "
+                "Consider raising max_paths / max_hops for this case.",
+                hop_scheduler.iterations, len(hop_scheduler),
+            )
 
         # Set termination reasons for any remaining paths
         for path in paths.values():

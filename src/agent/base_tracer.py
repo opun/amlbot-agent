@@ -51,7 +51,10 @@ OPENAI_TIMEOUT = 90
 OPENAI_CONNECT_TIMEOUT = 10
 TOOL_TIMEOUT = 30
 TOOL_TIMEOUT_SLOW = 60
-_SLOW_TOOLS = frozenset({"all_txs", "bridge_analyze"})
+# `get_extra_address_info` is upstream-bound and regularly blows past 20s for
+# high-activity hub contracts (observed ReadTimeout at 30s in prod logs), so
+# give it the slow budget. `all_txs` + `bridge_analyze` were already slow.
+_SLOW_TOOLS = frozenset({"all_txs", "bridge_analyze", "get_extra_address_info"})
 MAX_TOOL_CALLS_PER_TURN = 6
 MAX_TOKEN_TRANSFERS_PER_TURN = 2
 MAX_TX_LIST = 500
@@ -1949,8 +1952,16 @@ class BaseTracer(ABC):
             async def _paginated_fetch(
                 filter_obj: dict[str, Any],
                 transaction_type: str,
-            ) -> list[dict[str, Any]]:
+            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                """Paginate `all_txs` and return (items, first_page_meta).
+
+                We surface the first response's `meta` so the caller can check
+                `filter_total` — if the server reports zero matches, further
+                retries (fallback pass, wider-window pass) on the same address
+                are guaranteed misses and can be skipped.
+                """
                 collected: list[dict[str, Any]] = []
+                first_meta: dict[str, Any] = {}
                 offset = 0
                 pages = 0
                 while pages < max_pages:
@@ -1965,6 +1976,10 @@ class BaseTracer(ABC):
                         "order": "time",
                         "transaction_type": transaction_type,
                     })
+                    if pages == 0 and isinstance(result, dict):
+                        meta = result.get("meta")
+                        if isinstance(meta, dict):
+                            first_meta = meta
                     data_list = result.get("data", []) if isinstance(result, dict) else []
                     if not data_list:
                         break
@@ -1973,7 +1988,7 @@ class BaseTracer(ABC):
                         break
                     offset += page_limit
                     pages += 1
-                return collected
+                return collected, first_meta
 
             base_filter: dict[str, Any] = {}
             if incoming_time:
@@ -1982,8 +1997,16 @@ class BaseTracer(ABC):
                 base_filter["token_id"] = [token_id]
 
             primary_bucket: dict[str, dict[str, Any]] = {}
-            primary_items = await _paginated_fetch(base_filter, "withdrawal")
+            primary_items, primary_meta = await _paginated_fetch(base_filter, "withdrawal")
             _ingest(primary_items, primary_bucket)
+
+            # Dead-end short-circuit: when the server reports zero rows match
+            # the full filter AND primary returned nothing, the delta-coerced
+            # fallback will hit the same empty result set. Skip it instead of
+            # firing another full pagination round.
+            primary_filter_total = primary_meta.get("filter_total") if primary_meta else None
+            if not primary_items and primary_filter_total == 0:
+                return []
 
             # Coverage check: only attempt the fallback when we know what we
             # expected to see and the primary pass fell notably short.
@@ -2015,7 +2038,7 @@ class BaseTracer(ABC):
                 # delta sits near zero.
                 fallback_filter = dict(base_filter)
                 fallback_filter["delta_coerced"] = None
-                fallback_items = await _paginated_fetch(fallback_filter, "all")
+                fallback_items, _fallback_meta = await _paginated_fetch(fallback_filter, "all")
 
                 added = 0
                 for item in fallback_items:
@@ -2997,11 +3020,14 @@ class BaseTracer(ABC):
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
                 logger.info("Path %s stopped at %s (hop %d): no new transactions after selection", job.path_id, self._format_address(job.current_address), job.hop_index)
 
-        # Parallel Phase 1 (get_address / get_extra_address_info / bridge_analyze)
-        # across survivors of the current batch. Phase 2 still runs sequentially
-        # per job because it mutates path_counter / fifo_ledger. Default is ON
-        # now that _resolve_transfer is also parallelized inside each Phase 2 —
-        # set AGENT_PARALLEL_HOPS=0 to opt out.
+        # Parallel Phase 1 AND Phase 2 across survivors of the current batch.
+        # Phase 2 mutates shared state (path_counter, fifo_ledger, paths dict)
+        # but all such mutations happen in synchronous code blocks without
+        # awaits between them, which makes them atomic under the asyncio GIL
+        # contract — concurrent tasks only interleave at await points, and the
+        # order-sensitive pairs (attribute_outflow → record_inflow, path_counter
+        # increment → _copy_path) are each a single sync block.
+        # Default is ON; set AGENT_PARALLEL_HOPS=0 to opt out.
         _parallel_hops = os.getenv("AGENT_PARALLEL_HOPS", "1").lower() in ("1", "true", "yes")
         _hop_fanout = max(1, min(16, int(os.getenv("AGENT_HOP_FANOUT", "5"))))
 
@@ -3070,12 +3096,15 @@ class BaseTracer(ABC):
 
             if _parallel_hops and len(survivors) > 1:
                 _p1_list = await asyncio.gather(*(_agentic_phase1_for_job(j) for j in survivors))
+                await asyncio.gather(*(
+                    _agentic_hop_after_phase1(job, _p1[0], _p1[1], _p1[2])
+                    for job, _p1 in zip(survivors, _p1_list, strict=True)
+                ))
             else:
                 _p1_list = [await _agentic_phase1_for_job(j) for j in survivors]
-
-            for job, _p1 in zip(survivors, _p1_list, strict=True):
-                _ga, _ge, _ebr = _p1
-                await _agentic_hop_after_phase1(job, _ga, _ge, _ebr)
+                for job, _p1 in zip(survivors, _p1_list, strict=True):
+                    _ga, _ge, _ebr = _p1
+                    await _agentic_hop_after_phase1(job, _ga, _ge, _ebr)
 
         if hop_scheduler.exhausted and len(hop_scheduler) > 0:
             logger.warning(

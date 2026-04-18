@@ -620,6 +620,66 @@ class BaseTracer(ABC):
 
     _SATOSHI_CHAINS = {"btc", "bch", "ltc"}
 
+    # Account-model chains whose native asset never shows up in token_transfers.
+    # For these (chain, asset) pairs we jump straight to get_transaction and skip
+    # the guaranteed-empty token_transfers round-trip.
+    _NATIVE_ASSET_BY_CHAIN = {
+        "eth": {"ETH"},
+        "bnb": {"BNB"},
+        "bsc": {"BNB"},
+        "polygon": {"MATIC", "POL"},
+        "matic": {"MATIC", "POL"},
+        "arbitrum": {"ETH"},
+        "arb": {"ETH"},
+        "optimism": {"ETH"},
+        "op": {"ETH"},
+        "base": {"ETH"},
+        "trx": {"TRX"},
+        "tron": {"TRX"},
+        "avax": {"AVAX"},
+        "avalanche": {"AVAX"},
+        "sol": {"SOL"},
+        "solana": {"SOL"},
+    }
+
+    def _is_native_asset(self, chain: str | None, asset: str | None) -> bool:
+        if not chain or not asset:
+            return False
+        natives = self._NATIVE_ASSET_BY_CHAIN.get(chain.lower())
+        if not natives:
+            return False
+        return asset.upper() in natives
+
+    def _should_skip_token_transfers(
+        self,
+        chain: str | None,
+        asset_hint: str | None,
+        address_hint: str | None,
+        tx_token_id: int | None,
+    ) -> bool:
+        """Decide whether ``_resolve_transfer`` may jump straight to
+        ``get_transaction`` and skip ``token_transfers``.
+
+        Skipping is only safe when BOTH hold:
+          1. The trace is walking a chain's *native* asset (ETH on eth,
+             TRX on trx, …) — token_transfers is guaranteed empty and
+             would just add a round-trip.
+          2. The *specific tx* we're resolving is itself a native transfer
+             (token_id == 0 / None). If the classifier picked a token tx
+             (e.g. USDT on eth with token_id=94252), ``get_transaction``
+             will return the token-contract address as ``to`` and the
+             trace will dead-end at the contract instead of the real
+             recipient — we must take the token_transfers route in that
+             case.
+        """
+        if address_hint is None:
+            return False
+        if not self._is_native_asset(chain, asset_hint):
+            return False
+        if tx_token_id is not None and int(tx_token_id) != 0:
+            return False
+        return True
+
     def _normalize_amount(self, amount: Any, chain: str, asset: str | None = None) -> float:
         try:
             val = float(amount)
@@ -1739,20 +1799,63 @@ class BaseTracer(ABC):
             address_hint: str | None = None,
             token_id_val: int | None = None,
             expected_from: str | None = None,
+            asset_hint: str | None = None,
         ) -> dict[str, Any] | None:
-            """Try token_transfers first, fall back to get_transaction for native/UTXO txs."""
-            transfer_result = await _call_tool("token_transfers", {
-                "tx_hash": tx_hash_val,
-                "blockchain_name": chain_name,
-            })
-            transfer = self._parse_transfer(transfer_result, expected_from=expected_from, token_id=token_id_val)
-            if transfer and transfer.get("to"):
-                return transfer
+            """Try token_transfers first, fall back to get_transaction for native/UTXO txs.
+
+            When we already know the transfer is of a chain's native asset
+            (e.g. ETH on eth, TRX on trx) token_transfers always comes back
+            empty, so we skip that round-trip and go straight to
+            get_transaction.
+            """
+            # Inspect the already-fetched all_txs record (if any) to see
+            # whether *this specific* tx is actually a token transfer. A
+            # native-asset trace (asset_hint="ETH") can still legitimately
+            # select a USDT/USDC/etc. tx on the hot-path — in that case we
+            # MUST hit token_transfers, otherwise get_transaction returns the
+            # token-contract address as ``to`` and the trace terminates at
+            # ``0xdac17f…1ec7`` (USDT contract) instead of the real
+            # recipient.
+            tx_info_for_hash = all_txs_map.get(tx_hash_val) or {}
+            tx_token_id = (
+                tx_info_for_hash.get("token_id")
+                if tx_info_for_hash else None
+            )
+            if tx_token_id is None and token_id_val is not None:
+                tx_token_id = token_id_val
+            tx_is_token_transfer = bool(tx_token_id) and int(tx_token_id) != 0
+
+            skip_token_transfers = self._should_skip_token_transfers(
+                chain=chain_name,
+                asset_hint=asset_hint,
+                address_hint=address_hint,
+                tx_token_id=tx_token_id,
+            )
+
+            if not skip_token_transfers:
+                transfer_result = await _call_tool("token_transfers", {
+                    "tx_hash": tx_hash_val,
+                    "blockchain_name": chain_name,
+                })
+                # For a known token tx, pass the tx's token_id explicitly
+                # so _parse_transfer can filter out other tokens moved in
+                # the same tx (multi-token swap routers etc.).
+                parse_token_id = token_id_val
+                if parse_token_id in (None, 0) and tx_is_token_transfer:
+                    parse_token_id = int(tx_token_id)
+                transfer = self._parse_transfer(
+                    transfer_result,
+                    expected_from=expected_from,
+                    token_id=parse_token_id,
+                )
+                if transfer and transfer.get("to"):
+                    return transfer
 
             # Fallback: get_transaction (needed for native ETH, BTC, BCH, LTC, etc.)
             if not address_hint:
                 return None
-            logger.info(f"token_transfers empty for {tx_hash_val[:16]}...; falling back to get_transaction")
+            if not skip_token_transfers:
+                logger.info(f"token_transfers empty for {tx_hash_val[:16]}...; falling back to get_transaction")
             tx_result = await _call_tool("get_transaction", {
                 "address": address_hint,
                 "tx_hash": tx_hash_val,
@@ -2149,6 +2252,7 @@ class BaseTracer(ABC):
                     tx_hash, chain,
                     address_hint=victim_address,
                     token_id_val=token_id_hint,
+                    asset_hint=asset,
                 )
                 if not transfer or not transfer.get("from") or not transfer.get("to"):
                     raise RuntimeError("Unable to extract theft transfer details from tx_hash")
@@ -2265,14 +2369,22 @@ class BaseTracer(ABC):
             if not used_accumulation:
                 selected_hashes = selected_hashes[:max_paths]
 
-            seen_recipients: set = set()
-            for idx, sel_hash in enumerate(selected_hashes):
-                transfer = await _resolve_transfer(
+            # Pre-resolve all seed transfers in parallel; the mutation loop
+            # below stays sequential so path_counter / fifo_ledger ordering is
+            # preserved.
+            _prefetched_transfers = await asyncio.gather(*(
+                _resolve_transfer(
                     sel_hash, chain,
                     address_hint=victim_address,
                     token_id_val=token_id_hint,
                     expected_from=victim_address,
+                    asset_hint=asset,
                 )
+                for sel_hash in selected_hashes
+            )) if selected_hashes else []
+
+            seen_recipients: set = set()
+            for idx, (sel_hash, transfer) in enumerate(zip(selected_hashes, _prefetched_transfers, strict=True)):
                 if not transfer or not transfer.get("to"):
                     continue
                 to_addr = transfer["to"]
@@ -2758,13 +2870,22 @@ class BaseTracer(ABC):
             # outflow accumulation targets the true aggregate inflow.
             recipient_state: dict[str, dict[str, Any]] = {}
             used_base_path = False
-            for _idx, sel_hash in enumerate(selected_hashes):
-                transfer = await _resolve_transfer(
+            # Pre-resolve all transfers for this hop's selected hashes in
+            # parallel. Each _resolve_transfer is a pure read (1-2 HTTP calls)
+            # with no shared-state mutation, so gathering them is safe. The
+            # mutation loop that follows stays sequential so FIFO attribution
+            # and path_counter bookkeeping remain deterministic.
+            _hop_prefetched = await asyncio.gather(*(
+                _resolve_transfer(
                     sel_hash, job.chain,
                     address_hint=job.current_address,
                     token_id_val=job.token_id,
                     expected_from=job.current_address,
+                    asset_hint=job.asset,
                 )
+                for sel_hash in selected_hashes
+            )) if selected_hashes else []
+            for _idx, (sel_hash, transfer) in enumerate(zip(selected_hashes, _hop_prefetched, strict=True)):
                 if not transfer or not transfer.get("to"):
                     continue
                 to_addr = transfer["to"]
@@ -2876,8 +2997,13 @@ class BaseTracer(ABC):
                 paths[job.path_id]["stop_reason"] = "Loop detected - no new transactions"
                 logger.info("Path %s stopped at %s (hop %d): no new transactions after selection", job.path_id, self._format_address(job.current_address), job.hop_index)
 
-        _parallel_hops = os.getenv("AGENT_PARALLEL_HOPS", "").lower() in ("1", "true", "yes")
-        _hop_fanout = max(1, min(16, int(os.getenv("AGENT_HOP_FANOUT", "3"))))
+        # Parallel Phase 1 (get_address / get_extra_address_info / bridge_analyze)
+        # across survivors of the current batch. Phase 2 still runs sequentially
+        # per job because it mutates path_counter / fifo_ledger. Default is ON
+        # now that _resolve_transfer is also parallelized inside each Phase 2 —
+        # set AGENT_PARALLEL_HOPS=0 to opt out.
+        _parallel_hops = os.getenv("AGENT_PARALLEL_HOPS", "1").lower() in ("1", "true", "yes")
+        _hop_fanout = max(1, min(16, int(os.getenv("AGENT_HOP_FANOUT", "5"))))
 
         while hop_scheduler.should_continue(_completed_paths_count()):
             _batch_size = min(_hop_fanout, len(hop_scheduler)) if _parallel_hops else 1

@@ -150,7 +150,7 @@ class MCPHTTPClient:
         self.user_id = user_id
         self.client = httpx.AsyncClient(
             timeout=60.0,
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=32, keepalive_expiry=30.0),
+            limits=httpx.Limits(max_keepalive_connections=50, max_connections=100, keepalive_expiry=30.0),
             http2=True,
         )
 

@@ -1,12 +1,144 @@
+import json
 import logging
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from agent.models import Entity, TraceResult
 
 logger = logging.getLogger(__name__)
+
+VIZ_MODULE_VERSION = "token_id-fix-2"
+logger.info(
+    "visualization.py loaded — VIZ_MODULE_VERSION=%s "
+    "(edge_token_id + descriptor-parse fallback). "
+    "If you don't see this line on startup, you're running a stale module.",
+    VIZ_MODULE_VERSION,
+)
+
+
+def _token_id_from_descriptor(desc: str | None) -> int | None:
+    """Parse the ``token_id`` out of a tx descriptor of the shape
+    ``{hash}-{chain}-{token_id}-{idx}`` (the format written by
+    ``base_tracer._collect_token_transfer_data``). Returns ``None`` if the
+    descriptor does not match, so callers can fall back safely.
+
+    This gives the viz a ground-truth source for the per-tx token that doesn't
+    depend on whether ``tx_list``/``txs`` happened to carry ``tokenId``: even
+    if both of those arrays get filtered/stripped upstream, the descriptor
+    string alone is enough to render the edge correctly (e.g. a USDT hop whose
+    descriptor is ``0x5438d5cb…-eth-94252-7`` resolves to ``94252``).
+    """
+    if not desc or not isinstance(desc, str):
+        return None
+    parts = desc.split("-")
+    if len(parts) < 4:
+        return None
+    try:
+        return int(parts[-2])
+    except (TypeError, ValueError):
+        return None
+
+
+@lru_cache(maxsize=1)
+def _load_currency_db() -> dict[tuple[str, int], dict[str, Any]]:
+    """Load ``src/currencies.json`` once and index it by ``(chain, token_id)``.
+
+    Returns a mapping from normalized ``(chain, token_id)`` to the full
+    currency record (``name``/``symbol``/``unit``/``issuer``).
+    """
+    path = Path(__file__).resolve().parents[1] / "currencies.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Could not load currencies.json: %s", exc)
+        return {}
+
+    out: dict[tuple[str, int], dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        chain = (item.get("currency") or "").strip().lower()
+        tid = item.get("token_id")
+        if not chain or tid is None:
+            continue
+        # Skip testnets — they share symbols with mainnets and would shadow them.
+        if "testnet" in chain:
+            continue
+        try:
+            key = (chain, int(tid))
+        except (TypeError, ValueError):
+            continue
+        # Prefer the first hit for native (token_id == 0) so mainnet wins.
+        out.setdefault(key, item)
+    return out
+
+
+def _lookup_currency(chain: str, token_id: int) -> dict[str, Any] | None:
+    """Return the currencies.json record for ``(chain, token_id)`` or None."""
+    if not chain:
+        return None
+    return _load_currency_db().get((chain.lower(), int(token_id)))
+
+
+# Fallback tables used when the token isn't in currencies.json.
+_NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
+_TOKEN_UNIT_MAP = {
+    "USDT": 6, "USDC": 6, "DAI": 18, "BUSD": 18,
+    "WETH": 18, "WBTC": 8, "LINK": 18, "UNI": 18,
+    "AAVE": 18, "GRT": 18, "MTL": 8,
+}
+_CURRENCY_NAMES = {
+    "eth": "Ethereum", "btc": "Bitcoin", "trx": "TRON",
+    "bnb": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
+    "ltc": "Litecoin", "sol": "Solana",
+}
+
+
+def _build_currency_info(
+    chain: str, token_id: int, asset_hint: str = ""
+) -> dict[str, Any]:
+    """Produce a currencyInfo entry for ``(chain, token_id)``.
+
+    Prefers the canonical record from ``currencies.json`` so the
+    name/symbol/unit/issuer actually match the on-chain token (otherwise a
+    USDT transfer inside an "ETH" case would end up labelled as ETH with
+    unit 6). Falls back to the hardcoded maps only when the DB doesn't have
+    an entry.
+    """
+    rec = _lookup_currency(chain, token_id)
+    if rec:
+        return {
+            "currency": chain,
+            "issuer": rec.get("issuer"),
+            "name": rec.get("name") or chain,
+            "symbol": rec.get("symbol") or chain,
+            "token_id": token_id,
+            "unit": rec.get("unit", 6),
+        }
+
+    is_native = token_id == 0
+    asset_upper = (asset_hint or "").upper()
+    if is_native:
+        unit = _NATIVE_UNIT_MAP.get(chain, 6)
+        name = _CURRENCY_NAMES.get(chain, chain)
+        symbol = chain
+    else:
+        unit = _TOKEN_UNIT_MAP.get(asset_upper, 6)
+        if asset_upper == "USDT":
+            name, symbol = "Tether USD", "USDT"
+        else:
+            name = asset_hint or chain
+            symbol = asset_upper or chain
+    return {
+        "currency": chain,
+        "issuer": None,
+        "name": name,
+        "symbol": symbol,
+        "token_id": token_id,
+        "unit": unit,
+    }
 
 def _normalize_chain(chain: str) -> str:
     c = (chain or "").lower()
@@ -276,10 +408,52 @@ def generate_visualization_payload(
     use_provided_tx_list = bool(tx_list_inputs)
 
     fiat_rate_by_hash: dict[str, float] = {}
+    provided_tx_hashes: set[str] = set()
+    # Raw (on-chain base-unit) amount keyed by tx hash, harvested from the
+    # incoming tx_list. Used to populate ``connects[].data.amount`` so each
+    # edge is self-sufficient and the frontend doesn't need to fall back to
+    # a (sometimes failing) hash→txList join to know how much was moved.
+    amount_by_hash: dict[str, Any] = {}
+    # Actual on-chain token_id keyed by tx hash, harvested from tx_list/txs.
+    # The Step model carries only the *trace-level* asset symbol (e.g. "ETH"
+    # for a stolen-ETH case), so a USDT hop downstream still has
+    # ``step.asset == "ETH"`` and the naive ``token_id_map[(chain,asset)]``
+    # lookup returns 0. Feeding the real per-hash token_id into the edge
+    # payload lets the frontend render "413.759798 USDT" instead of "NaN".
+    token_id_by_hash: dict[str, int] = {}
     for tx in tx_list_inputs:
         h = tx.get("hash")
         if h:
             fiat_rate_by_hash[h] = float(tx.get("fiatRate") or tx.get("fiat_rate") or 1.0)
+            provided_tx_hashes.add(h)
+            amt = tx.get("amount")
+            if amt is not None:
+                amount_by_hash[h] = amt
+            tid = tx.get("tokenId")
+            if tid is None:
+                tid = tx.get("token_id")
+            if tid is not None:
+                try:
+                    token_id_by_hash[h] = int(tid)
+                except (TypeError, ValueError):
+                    pass
+    # Also harvest token_id from the pre-built ``txs`` list (populated by
+    # ``_collect_token_transfer_data`` in base_tracer). That path is the one
+    # that actually fires for in-trace resolved token hops, so it covers
+    # cases where tx_list was filtered/capped.
+    if txs:
+        for tx in txs:
+            h = tx.get("hash")
+            if not h or h in token_id_by_hash:
+                continue
+            tid = tx.get("token_id")
+            if tid is None:
+                tid = tx.get("tokenId")
+            if tid is not None:
+                try:
+                    token_id_by_hash[h] = int(tid)
+                except (TypeError, ValueError):
+                    pass
 
     address_to_entity = {e.address: e for e in trace_result.entities}
 
@@ -332,24 +506,45 @@ def generate_visualization_payload(
     edges = []
 
     token_id_map = {} # (chain, asset) -> int
+    # Collect every (chain, token_id) actually observed in tx_list so the
+    # currencyInfo block below can emit accurate name/symbol/unit/issuer
+    # entries for each token (not just whichever one the case_meta hints at).
+    observed_token_ids: set[tuple[str, int]] = set()
     if tx_list_inputs:
         try:
-            asset_hint = (trace_result.case_meta.asset_symbol or "").upper()
+            case_hint = (trace_result.case_meta.asset_symbol or "").upper()
         except AttributeError:
-            asset_hint = ""
+            case_hint = ""
         for tx in tx_list_inputs:
             chain = _normalize_chain(tx.get("currency"))
             token_id = tx.get("tokenId")
             if token_id is None:
                 token_id = tx.get("token_id")
-            if chain and token_id is not None:
-                tid = int(token_id)
-                if tid == 0:
-                    native_sym = chain.upper()
-                    token_id_map.setdefault((chain, native_sym), 0)
-                    token_id_map.setdefault((chain, ""), 0)
-                elif asset_hint:
-                    token_id_map[(chain, asset_hint)] = tid
+            if not chain or token_id is None:
+                continue
+            tid = int(token_id)
+            observed_token_ids.add((chain, tid))
+            if tid == 0:
+                native_sym = chain.upper()
+                token_id_map.setdefault((chain, native_sym), 0)
+                token_id_map.setdefault((chain, ""), 0)
+                # The case hint usually matches the native symbol for a
+                # native-asset case (e.g. "ETH" on eth) — set it too so
+                # lookups by step.asset="ETH" keep returning 0 even when a
+                # token-transfer tx appears later.
+                if case_hint:
+                    token_id_map.setdefault((chain, case_hint), 0)
+            else:
+                # Look up the *actual* asset symbol for this (chain, tid)
+                # from the canonical currency DB instead of trusting the
+                # case-level asset_symbol hint. Otherwise, a single USDT
+                # transfer (tid=94252) in an "ETH" case would wrongly map
+                # ("eth","ETH") → 94252 and drag every native edge with it.
+                rec = _lookup_currency(chain, tid)
+                sym = (rec.get("symbol") if rec else None) or ""
+                sym = str(sym).upper()
+                if sym:
+                    token_id_map.setdefault((chain, sym), tid)
     node_weights = defaultdict(float) # descriptor -> total volume
 
     def get_node_descriptor(address: str, chain: str, token_id: int) -> str:
@@ -391,6 +586,14 @@ def generate_visualization_payload(
             tx_desc = norm.get("descriptor")
             if tx_hash and tx_desc:
                 tx_desc_by_hash[tx_hash] = tx_desc
+                # Belt-and-suspenders: also harvest the token_id straight out of
+                # the descriptor string. ``_collect_token_transfer_data`` bakes
+                # the real token_id into the descriptor as the second-to-last
+                # dash-separated segment, so this works even if ``tx_list`` and
+                # ``txs`` both fail to carry ``tokenId`` for the hash.
+                desc_tid = _token_id_from_descriptor(tx_desc)
+                if desc_tid is not None and tx_hash not in token_id_by_hash:
+                    token_id_by_hash[tx_hash] = desc_tid
     tx_desc_seen: set[str] = set()
 
     for step in all_steps:
@@ -416,6 +619,13 @@ def generate_visualization_payload(
 
     # Log graph topology
     logger.info(f"📊 Graph topology: {len(node_descriptors)} nodes, {len(edges)} edges")
+    if token_id_by_hash:
+        _nonzero = {h: t for h, t in token_id_by_hash.items() if t}
+        if _nonzero:
+            logger.info(
+                f"🧮 Per-hash token_id overrides (edge/tx will advertise the real token): "
+                f"{ {h[:10]+'…': t for h, t in _nonzero.items()} }"
+            )
     logger.debug(f"Nodes: {list(node_descriptors)}")
     logger.debug(f"Token ID Map: {token_id_map}")
 
@@ -485,17 +695,24 @@ def generate_visualization_payload(
         added_descriptors.add(descriptor)
 
     # --- Pre-fill Currency Info with Native ---
-    # Ensure native TRX/ETH is present
-    blockchain = trace_result.case_meta.blockchain_name
-    if blockchain == "trx":
-         currency_info[0] = {
-            "currency": "trx",
-            "issuer": None,
-            "name": "TRON",
-            "symbol": "trx",
-            "token_id": 0,
-            "unit": 6
-         }
+    # Ensure the case's native asset is present even if no step produced it
+    # yet. Keyed by ``(chain, token_id)`` so a cross-chain trace keeps both
+    # native entries (e.g. both eth:0 and trx:0) instead of one clobbering
+    # the other.
+    blockchain = _normalize_chain(trace_result.case_meta.blockchain_name)
+    if blockchain:
+        key = (blockchain, 0)
+        if key not in currency_info:
+            currency_info[key] = _build_currency_info(blockchain, 0)
+
+    # Also pre-fill entries for every (chain, token_id) observed in the
+    # tx_list so downstream consumers can resolve amounts/units even when
+    # the token never appears as a step's asset (e.g. destination-side
+    # tokens from bridge transfers).
+    for chain_obs, tid_obs in observed_token_ids:
+        key = (chain_obs, tid_obs)
+        if key not in currency_info:
+            currency_info[key] = _build_currency_info(chain_obs, tid_obs)
 
     # --- Pass 4: Generate Edges & Txs ---
     # Prepare for autoTxs: map address -> list of (step_index, type, hash, path)
@@ -504,13 +721,40 @@ def generate_visualization_payload(
     for i_step, step in enumerate(all_steps):
         chain = _normalize_chain(step.chain)
         asset = (step.asset or "").upper()
-        token_id = token_id_map.get((chain, asset), 0)
+        # Address-view token_id: used to KEY the address node, so all hops on
+        # a chain share one node per address regardless of which token moved
+        # (e.g. an ETH trace that touches USDT keeps the deposit address on
+        # the same ``-eth-0`` lane as its upstream ETH hop).
+        node_token_id = token_id_map.get((chain, asset), 0)
+        # Edge/tx token_id: reflects the *actual* asset that moved in this
+        # specific tx. step.asset is propagated from the trace-level asset
+        # and is often stale ("ETH" for a USDT hop), so prefer the real
+        # token_id harvested from tx_list/txs by hash. Without this, the
+        # edge payload advertises ``token_id=0, currency=eth`` for a USDT
+        # transfer, the frontend can't join it to the USDT ``txList`` row,
+        # and the edge label renders as "NaN".
+        # Resolution order for the per-edge token_id (most → least trusted):
+        #   1. token_id_by_hash harvested from ``tx_list``/``txs`` args.
+        #   2. The pre-built descriptor in ``tx_desc_by_hash`` — its
+        #      ``…-{chain}-{token_id}-{idx}`` suffix is authoritative because
+        #      ``base_tracer._collect_token_transfer_data`` copies the real
+        #      token_id into it.
+        #   3. The chain-native token_id derived from ``step.asset``.
+        edge_token_id = node_token_id
+        if step.tx_hash:
+            if step.tx_hash in token_id_by_hash:
+                edge_token_id = token_id_by_hash[step.tx_hash]
+            else:
+                desc_tid = _token_id_from_descriptor(tx_desc_by_hash.get(step.tx_hash))
+                if desc_tid is not None:
+                    edge_token_id = desc_tid
+                    token_id_by_hash[step.tx_hash] = desc_tid
 
-        src_desc = get_node_descriptor(step.from_address, chain, token_id)
-        tgt_desc = get_node_descriptor(step.to_address, chain, token_id)
+        src_desc = get_node_descriptor(step.from_address, chain, node_token_id)
+        tgt_desc = get_node_descriptor(step.to_address, chain, node_token_id)
 
-        add_node_or_comment(step.from_address, chain, token_id)
-        add_node_or_comment(step.to_address, chain, token_id)
+        add_node_or_comment(step.from_address, chain, node_token_id)
+        add_node_or_comment(step.to_address, chain, node_token_id)
 
         src_pos = positions.get(src_desc, {"x": 0, "y": 0})
         tgt_pos = positions.get(tgt_desc, {"x": 0, "y": 0})
@@ -519,7 +763,12 @@ def generate_visualization_payload(
         edge_color = "#EC292C"
 
         tx_hash = step.tx_hash or f"tx-{uuid.uuid4().hex}"
-        tx_desc = tx_desc_by_hash.get(step.tx_hash) or f"{tx_hash}-{chain}-{token_id}-{i_step}"
+        # The tx descriptor must match whatever was pre-baked in
+        # ``tx_desc_by_hash`` (populated upstream by
+        # ``_collect_token_transfer_data``) so the edge's ``target`` and the
+        # ``txs[].descriptor`` line up; fall back to the real token_id when
+        # no pre-built descriptor exists.
+        tx_desc = tx_desc_by_hash.get(step.tx_hash) or f"{tx_hash}-{chain}-{edge_token_id}-{i_step}"
 
         mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
         mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
@@ -534,7 +783,7 @@ def generate_visualization_payload(
                 "currency": chain,
                 "descriptor": tx_desc,
                 "hash": tx_hash,
-                "token_id": token_id,
+                "token_id": edge_token_id,
                 "x": mid_x,
                 "y": mid_y,
                 "color": edge_color,
@@ -545,14 +794,34 @@ def generate_visualization_payload(
 
         fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0) if step.tx_hash else 1.0
 
+        # Resolve a concrete edge amount so the frontend never has to render
+        # "NaN" when its internal hash→txList lookup misses (as it does for
+        # e.g. bridge/swap dst txs or USDT-contract pseudo-destinations).
+        # Unit scaling uses ``edge_token_id`` (the tx's real token) so a
+        # 413.759798 USDT estimate becomes 413759798 (×10^6), not
+        # 413759798000 (×10^9, which is what happens if we use the native
+        # ETH unit for a USDT hop).
+        edge_amount: Any = None
+        if step.tx_hash and step.tx_hash in amount_by_hash:
+            edge_amount = amount_by_hash[step.tx_hash]
+        elif step.amount_estimate:
+            rec = _lookup_currency(chain, edge_token_id)
+            unit = (rec.get("unit") if rec else None)
+            if unit is None:
+                unit = _NATIVE_UNIT_MAP.get(chain, 6) if edge_token_id == 0 else 6
+            try:
+                edge_amount = int(float(step.amount_estimate) * (10 ** int(unit)))
+            except (TypeError, ValueError, OverflowError):
+                edge_amount = None
+
         connects.append({
             "source": src_desc,
             "target": tx_desc,
             "data": {
                 "currency": chain,
-                "amount": None,
+                "amount": edge_amount,
                 "fiatRate": fiat_rate,
-                "token_id": token_id,
+                "token_id": edge_token_id,
                 "color": edge_color,
                 "type": "straight",
                 "isNew": True,
@@ -565,9 +834,9 @@ def generate_visualization_payload(
             "target": tgt_desc,
             "data": {
                 "currency": chain,
-                "amount": None,
+                "amount": edge_amount,
                 "fiatRate": fiat_rate,
-                "token_id": token_id,
+                "token_id": edge_token_id,
                 "color": edge_color,
                 "type": "straight",
                 "isNew": True,
@@ -576,35 +845,47 @@ def generate_visualization_payload(
             }
         })
 
-        # Record activity for autoTxs
-        # For Sender (OUT)
-        address_activity[(step.from_address, chain, token_id)].append({
+        # Record activity for autoTxs (keyed on the *node* token_id so each
+        # chain-view of an address keeps a single activity bucket).
+        address_activity[(step.from_address, chain, node_token_id)].append({
             "type": "out",
             "hash": step.tx_hash,
             "index": i_step,
             "path": "0"
         })
-        # For Receiver (IN)
-        address_activity[(step.to_address, chain, token_id)].append({
+        address_activity[(step.to_address, chain, node_token_id)].append({
              "type": "in",
              "hash": step.tx_hash,
              "index": i_step,
              "path": "0"
         })
 
-        # Add txList entry when not provided, or when hash is synthetic
-        # (synthetic hashes won't exist in a provided txList)
+        # Emit a txList entry when the step's tx is not already represented
+        # there. Three distinct cases need coverage:
+        #   1. No tx_list was provided at all → we must synthesize everything.
+        #   2. step.tx_hash is None → we've generated a synthetic ``tx-…`` hash
+        #      that certainly isn't in any upstream list.
+        #   3. step.tx_hash is a *real* hash that the tx-collector never saw —
+        #      typically bridge/swap destination txs that live on a different
+        #      chain than the source-side ``all-txs`` queries. Without an
+        #      entry here the frontend cannot resolve amount/currency for the
+        #      edge and renders "NaN".
         is_synthetic_hash = step.tx_hash is None
-        if not use_provided_tx_list or is_synthetic_hash:
+        is_missing_hash = bool(step.tx_hash) and step.tx_hash not in provided_tx_hashes
+        if not use_provided_tx_list or is_synthetic_hash or is_missing_hash:
+            if tx_hash:
+                provided_tx_hashes.add(tx_hash)
             tx_list_inputs.append({
                 "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "hash": tx_hash,
                 "fiatRate": fiat_rate,
                 "addressesCount": 2,
-                "amount": int((step.amount_estimate or 0) * 1e6) if chain == 'trx' else step.amount_estimate,
+                "amount": edge_amount if edge_amount is not None else (
+                    int((step.amount_estimate or 0) * 1e6) if chain == 'trx' else step.amount_estimate
+                ),
                 "currency": chain,
-                "tokenId": token_id,
+                "tokenId": edge_token_id,
                 "poolTime": _get_timestamp(step.time),
                 "date": _get_timestamp(step.time),
                 "path": tx_path,
@@ -615,41 +896,13 @@ def generate_visualization_payload(
                 "direction": step.direction
             })
 
-        if token_id not in currency_info:
-            asset_upper = (step.asset or "").upper()
-            _NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
-            _TOKEN_UNIT_MAP = {
-                "USDT": 6, "USDC": 6, "DAI": 18, "BUSD": 18,
-                "WETH": 18, "WBTC": 8, "LINK": 18, "UNI": 18,
-                "AAVE": 18, "GRT": 18, "MTL": 8,
-            }
-            _CURRENCY_NAMES = {
-                "eth": "Ethereum", "btc": "Bitcoin", "trx": "TRON",
-                "bnb": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
-                "ltc": "Litecoin", "sol": "Solana",
-            }
-            is_native = (token_id == 0)
-            if is_native:
-                unit = _NATIVE_UNIT_MAP.get(chain, 6)
-            else:
-                unit = _TOKEN_UNIT_MAP.get(asset_upper, 6)
-            if asset_upper == "USDT":
-                name = "Tether USD"
-                symbol = "USDT"
-            elif is_native and chain in _CURRENCY_NAMES:
-                name = _CURRENCY_NAMES[chain]
-                symbol = chain
-            else:
-                name = step.asset or chain
-                symbol = asset_upper if asset_upper else chain
-            currency_info[token_id] = {
-                "currency": chain,
-                "issuer": None,
-                "name": name,
-                "symbol": symbol,
-                "token_id": token_id,
-                "unit": unit
-            }
+        ci_key = (chain, edge_token_id)
+        if ci_key not in currency_info:
+            currency_info[ci_key] = _build_currency_info(
+                chain=chain,
+                token_id=edge_token_id,
+                asset_hint=(step.asset or "").upper(),
+            )
 
     # --- Generate autoTxs ---
     auto_txs = []

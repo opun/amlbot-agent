@@ -8,7 +8,8 @@ in exactly one place.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import re
+from dataclasses import dataclass, replace
 from typing import Literal
 
 Family = Literal["reasoning", "standard"]
@@ -35,7 +36,7 @@ class ModelSpec:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         max_output_tokens: int | None = None,
-    ) -> "ModelSpec":
+    ) -> ModelSpec:
         """Return a copy with the given fields overridden.
 
         Raises if ``reasoning_effort`` is set on a non-reasoning model — that
@@ -106,8 +107,6 @@ KNOWN_MODELS: dict[str, ModelSpec] = {
     ),
 }
 
-
-import re
 
 # o-series (o1, o3, o4, o5-...) and gpt-5* are reasoning. Anything else
 # falls through to standard; add to KNOWN_MODELS explicitly when that's

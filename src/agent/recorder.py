@@ -22,10 +22,11 @@ import os
 import re
 import time
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class _ReplayIndex:
     llm_calls: dict[tuple[str, str], deque[dict[str, Any]]] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path) -> "_ReplayIndex":
+    def load(cls, path: Path) -> _ReplayIndex:
         idx = cls()
         with path.open("r", encoding="utf-8") as fh:
             for line_no, line in enumerate(fh, start=1):
@@ -165,7 +166,7 @@ def build_recording_filename(
     (``unknown`` / ``NA`` / ``noctx``) so the filename remains valid even
     for a replay that never learned its seed.
     """
-    ts = timestamp if timestamp is not None else datetime.now(timezone.utc)
+    ts = timestamp if timestamp is not None else datetime.now(UTC)
     ts_token = ts.strftime("%Y%m%dT%H%M%SZ")
     chain_token = _sanitize_segment(chain, fallback="unknown").lower()
     asset_token = _sanitize_segment(asset, fallback="NA").upper()
@@ -209,7 +210,7 @@ class TraceRecorder:
         # ``record_*`` call, picking up whatever context ``set_context``
         # has supplied by then.
         self._out_dir: Path | None = out_dir
-        self._created_at: datetime = datetime.now(timezone.utc)
+        self._created_at: datetime = datetime.now(UTC)
         self._context: dict[str, str | None] = {
             "chain": None,
             "asset": None,
@@ -274,7 +275,7 @@ class TraceRecorder:
         out_dir: Path | None = None,
         trace_id: str | None = None,
         record_reasoning: bool = False,
-    ) -> "TraceRecorder":
+    ) -> TraceRecorder:
         index = _ReplayIndex.load(replay_path)
         if trace_id is None:
             trace_id = f"replay_{replay_path.stem}_{int(time.time())}"
@@ -435,7 +436,7 @@ class TraceRecorder:
             self._fh = None
         return out
 
-    def __enter__(self) -> "TraceRecorder":
+    def __enter__(self) -> TraceRecorder:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

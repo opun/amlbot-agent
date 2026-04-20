@@ -13,15 +13,15 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agents import function_span, generation_span
+from agents import function_span
 from httpx import Limits, Timeout
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
+from openai import AsyncOpenAI
 
 from .config import ModelConfig
 from .currency_registry import get_registry as _get_currency_registry
@@ -34,7 +34,7 @@ from .models import (
     TraceResult,
 )
 from .prompt_loader import PromptSpec, load_prompt
-from .recorder import MissingReplayEvent, TraceRecorder, stable_hash
+from .recorder import MissingReplayEvent, TraceRecorder
 from .theft_detection import (
     extract_victim_from_tx_hash,
     infer_approx_date_from_description,
@@ -438,7 +438,7 @@ class BaseTracer(ABC):
         self.last_address_info: dict[str, dict[str, Any]] = {}
 
         # Recorder: optional record/replay of every LLM + tool call.
-        self.recorder: "TraceRecorder | None" = recorder
+        self.recorder: TraceRecorder | None = recorder
 
     # ─── Abstract methods (implemented by subclasses) ─────────────────────────
 
@@ -2100,11 +2100,11 @@ class BaseTracer(ABC):
                     src_ts = int(txt)
                 else:
                     try:
-                        from datetime import datetime, timezone
+                        from datetime import datetime
                         # ``fromisoformat`` on 3.11+ handles the trailing ``Z``.
                         dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
                         if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
+                            dt = dt.replace(tzinfo=UTC)
                         src_ts = int(dt.timestamp())
                     except (ValueError, TypeError):
                         src_ts = None

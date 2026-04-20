@@ -258,7 +258,7 @@ class MCPHTTPClient:
             return await inflight
 
         loop = asyncio.get_event_loop()
-        future: "asyncio.Future[Any]" = loop.create_future()
+        future: asyncio.Future[Any] = loop.create_future()
         self._inflight[key] = future
         try:
             result = await self._call_tool_uncached(tool_name, arguments)

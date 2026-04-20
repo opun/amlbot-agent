@@ -1,0 +1,39 @@
+{
+  "name": "002_unowned_intermediate_eth",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v1",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "0xc80fc2dc220f142864b53107b2fca83a0d671eda",
+    "chain": "eth",
+    "asset": "USDT",
+    "incoming_tx_hash": "0xdef",
+    "incoming_amount": 20000.0,
+    "get_address": {
+      "data": {
+        "owner": null,
+        "riskscore": 0.41
+      }
+    },
+    "get_extra_address_info": {
+      "data": {
+        "services": {}
+      }
+    },
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "intermediate",
+    "terminal": false
+  },
+  "synthetic_response": {
+    "role": "intermediate",
+    "terminal": false,
+    "stop_reason": null,
+    "labels": [],
+    "notes": "No owner info; plausibly a relay hop",
+    "service_label": null,
+    "protocol": null
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "002_slippage_threshold_stops",
+  "prompt_name": "hop_selector",
+  "prompt_version": "v1",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "chain": "eth",
+    "asset": "USDT",
+    "incoming_amount": 503300.0,
+    "incoming_time": 1700000000,
+    "txs": [
+      {"hash": "0xAAA", "amount_coerced": 400000, "block_time": 1700000001, "token_id": 94252, "type": "withdrawal"},
+      {"hash": "0xBBB", "amount_coerced": 100000, "block_time": 1700000002, "token_id": 94252, "type": "withdrawal"},
+      {"hash": "0xCCC", "amount_coerced": 484300, "block_time": 1700000003, "token_id": 94252, "type": "withdrawal"}
+    ]
+  },
+  "expected": {
+    "selected_hashes": ["0xAAA", "0xBBB"]
+  },
+  "synthetic_response": {
+    "selected_hashes": ["0xAAA", "0xBBB"],
+    "reasoning": "400000 then 500000; gap = 0.66% within 1.5% slippage threshold — stop."
+  }
+}

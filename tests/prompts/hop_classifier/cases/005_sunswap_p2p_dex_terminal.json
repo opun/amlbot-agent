@@ -1,0 +1,40 @@
+{
+  "name": "005_sunswap_p2p_dex_terminal",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v2",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "TCFNp179Lg46D16zKoumd4Poa2WFFdtqYj",
+    "chain": "trx",
+    "asset": "USDT",
+    "incoming_tx_hash": "15d438e213a546cfb4ee2d3d96260ac29f772399786f41b70fde64ad456f3b85",
+    "incoming_amount": 4589.27,
+    "get_address": {
+      "data": {
+        "owner": {
+          "name": "SunSwap",
+          "slug": "SunSwap",
+          "type": "p2p_exchange_unlicensed",
+          "subtype": "DEX"
+        },
+        "riskscore": 0.6
+      }
+    },
+    "get_extra_address_info": {"data": {"services": {}}},
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "dex_service",
+    "terminal": true
+  },
+  "synthetic_response": {
+    "role": "dex_service",
+    "terminal": true,
+    "stop_reason": "Reached SunSwap DEX (p2p_exchange + subtype DEX)",
+    "labels": ["SunSwap", "DEX"],
+    "notes": "p2p_exchange_unlicensed with subtype=DEX classifies as dex_service and terminates per Signal priority rule 1.",
+    "service_label": "SunSwap",
+    "protocol": "sunswap"
+  }
+}

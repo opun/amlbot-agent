@@ -13,7 +13,7 @@
 - **Детерминированный код** (Python) — основной цикл обхода (hop-by-hop), хронологическая аккумуляция, FIFO-учёт, планировщик путей, приоритетная очередь.
 - **LLM-вызовы** (OpenAI) в трёх точках: классификация каждого адреса (роль + терминал?), выбор транзакций для продолжения, финальная валидация JSON.
 
-Главный «агентный» промпт `trace_orchestrator.md` **не вызывает LLM** — это справочный документ, описывающий правила, на которых построен код. Живые LLM-вызовы идут через `trace_hop_classifier.md`, `trace_hop_selector.md` и `trace_validator.md` (+ устаревший `trace_selector.md`).
+Главный «агентный» промпт лежит в `docs/prompts/trace_orchestrator.reference.md` — это справочный документ, описывающий правила, на которых построен код. Runtime его не загружает. Живые LLM-вызовы идут через `trace_hop_classifier.md`, `trace_hop_selector.md` и `trace_validator.md`.
 
 ---
 
@@ -80,14 +80,13 @@ JSON_RETRY_MODEL   = os.getenv("OPENAI_JSON_RETRY_MODEL",   "gpt-4o")
 
 Класс `BaseTracer` (`base_tracer.py:405+`) абстрактный; транспорт (stdio-MCP / HTTP-MCP) реализуют подклассы `MCPTracer`, `HTTPTracer` через `execute_tool()`.
 
-### 5.1 Загрузка промптов (`base_tracer.py:425-462`)
+### 5.1 Загрузка промптов
 ```python
-self.prompt_path            = .../prompts/trace_orchestrator.md      # справочный, НЕ вызывается
-self.validator_prompt_path  = .../prompts/trace_validator.md
-self.selector_prompt_path   = .../prompts/trace_hop_selector.md
+self.validator_prompt_path      = .../prompts/trace_validator.md
+self.selector_prompt_path       = .../prompts/trace_hop_selector.md
 self.hop_classifier_prompt_path = .../prompts/trace_hop_classifier.md
 ```
-Функции `_load_prompt`, `_load_validator_prompt`, `_load_selector_prompt`, `_load_hop_classifier_prompt` — ленивое чтение файла.
+Функции `_load_validator_prompt`, `_load_selector_prompt`, `_load_hop_classifier_prompt` — ленивое чтение файла. Справочный `trace_orchestrator.reference.md` живёт в `docs/prompts/` и в рантайм не грузится.
 
 ### 5.2 Планировщик — `HopScheduler` (`base_tracer.py:77-140`)
 Приоритетная очередь hop-джобов. Приоритет:
@@ -171,7 +170,6 @@ generate_visualization_payload(...)
 | `_run_hop_classifier(ctx)` (`1097-1126`) | `trace_hop_classifier.md` | `SELECTOR_MODEL` | После Phase 1 на каждом адресе |
 | `_run_selector(ctx)` (`1065-1095`) | `trace_hop_selector.md` | `SELECTOR_MODEL` | Когда `all_txs` вернул список исходящих |
 | `_run_validator(payload)` (`1130-1157`) | `trace_validator.md` | `VALIDATOR_MODEL` | Финальная нормализация результата |
-| `_run_orchestrator(...)` (`1161+`) | `trace_orchestrator.md` | `ORCHESTRATOR_MODEL` | **Legacy** (tool-calling loop). В текущей архитектуре основной цикл живёт в `_run_agentic_trace`, оркестратор-промпт читается как справочный материал для fallback. |
 
 Все LLM-ответы обёрнуты в OpenAI `generation_span(...)` для трейсинга; JSON извлекается `_strip_code_fences` и парсится `json.loads`.
 
@@ -382,11 +380,9 @@ for tx in txs:
 
 ## 16. Промпты — полный текст и точки вызова
 
-### 16.1 `trace_orchestrator.md` — справочный, **LLM не вызывается в hot path**
+### 16.1 `trace_orchestrator.reference.md` — справочный, рантайм его не грузит
 
-Определяет правила, ссылки на инструменты и критерии классификации. Используется:
-- как единый источник правды для команды;
-- как system-prompt для legacy `_run_orchestrator` (включается, когда включён tool-calling loop).
+Определяет правила, ссылки на инструменты и критерии классификации. Назначение — единый источник правды для команды при изменении classifier/selector-логики. Исторически был system-prompt'ом legacy-оркестратора; сегодня ни один runtime-путь его не читает.
 
 **Структура**:
 1. Task и User Inputs (`{victim_address}`, `{tx_hash}`, `{blockchain_name}`, `{asset_symbol}`, `{approx_date}`, `{description}`).
@@ -394,7 +390,7 @@ for tx in txs:
 3. **Tracing Rules**, 11 секций: Input Processing, Theft Transaction Selection, Entity Classification (strong/weak signals, автоконтинуация, critical-do-not-stop-early), Bridge Detection (3 шага), Path Following (хронологическая аккумуляция с 1.5 % slippage и примерами), Pattern Detection, Output Format (JSON schema), Decision Style, Output Format Requirements, Efficiency & Anti-Stuck, Selector Results.
 4. Полная JSON-схема `TraceResult` и примеры корректного/некорректного заполнения `paths`.
 
-Полный файл — `src/agent/prompts/trace_orchestrator.md` (466 строк).
+Полный файл — `docs/prompts/trace_orchestrator.reference.md`.
 
 ### 16.2 `trace_hop_classifier.md` — классификатор адреса на хопе
 
@@ -524,39 +520,7 @@ Return a single JSON object:
 No markdown. No extra text.
 ```
 
-### 16.4 `trace_selector.md` — legacy top-level селектор
-
-**Статус**: устаревший; оставлен для ретро-совместимости. Использовался, когда у оркестратора не было hop-уровневого селектора и нужно было «ранжировать по сигналам». В текущем hop-by-hop коде **не вызывается**.
-
-**Полный текст** (`src/agent/prompts/trace_selector.md`):
-```
-You are a transaction selector for a crypto theft trace.
-Your job: choose the most promising transaction hashes to follow next.
-
-Input: a JSON object with a `txs` list containing items like:
-{
-  "hash": "...",
-  "amount": ...,
-  "block_time": ...,
-  "token_id": ...
-}
-
-Selection rules (in priority order):
-1. Prefer larger amounts.
-2. Prefer transactions closest in time to the incoming tx (if provided).
-3. Prefer fewer branches (max 2 hashes).
-4. If amounts are similar, pick the earliest by block_time.
-
-Output format (JSON only):
-{
-  "selected_hashes": ["0x...", "..."],
-  "reasoning": "short explanation"
-}
-
-Return ONLY raw JSON. No markdown or commentary.
-```
-
-### 16.5 `trace_validator.md` — финальный JSON-чинитель
+### 16.4 `trace_validator.md` — финальный JSON-чинитель
 
 **Вызов**: `BaseTracer._run_validator(payload)` (`base_tracer.py:1130-1157`). Таймаут 60 с.
 **Модель**: `VALIDATOR_MODEL` (`gpt-4o`). Нет `max_tokens` — ответ может быть большой (полный TraceResult).
@@ -596,11 +560,10 @@ Rules:
 
 | Промпт | Файл | Функция | Модель (env) | Когда | Ответ |
 |---|---|---|---|---|---|
-| Orchestrator | `trace_orchestrator.md` | `_run_orchestrator` (legacy) | `OPENAI_ORCHESTRATOR_MODEL` = `gpt-5-mini` | Legacy / справочно | TraceResult JSON |
 | Hop Classifier | `trace_hop_classifier.md` | `_run_hop_classifier` | `OPENAI_SELECTOR_MODEL` = `gpt-5-mini` | На каждом адресе после Phase 1 | `{role, terminal, stop_reason, labels, notes, service_label, protocol}` |
 | Hop Selector | `trace_hop_selector.md` | `_run_selector` | `OPENAI_SELECTOR_MODEL` = `gpt-5-mini` | После `all_txs` | `{selected_hashes, reasoning}` |
-| Legacy Selector | `trace_selector.md` | — | — | Не вызывается | `{selected_hashes, reasoning}` |
 | Validator | `trace_validator.md` | `_run_validator` | `OPENAI_VALIDATOR_MODEL` = `gpt-4o` | Финальный проход | валидный TraceResult |
+| Orchestrator (reference) | `docs/prompts/trace_orchestrator.reference.md` | — | — | Не вызывается; документирует правила | — |
 
 ---
 

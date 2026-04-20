@@ -1,0 +1,41 @@
+{
+  "name": "007_bridgers_other_bridge_subtype",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v3",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "0xb685760ebd368a891f27ae547391f4e2a289895b",
+    "chain": "eth",
+    "asset": "ETH",
+    "incoming_tx_hash": "0xe4a4af5fc8d3c17ae96c54bf5364163879d21c0981e6f9dfc031200283aa2d7e",
+    "incoming_amount": 0.14187,
+    "get_address": {
+      "data": {
+        "owner": {
+          "id": 346809816,
+          "name": "Bridgers",
+          "slug": "Bridgers",
+          "type": "other",
+          "subtype": "Bridge"
+        },
+        "riskscore": 0.25
+      }
+    },
+    "get_extra_address_info": {"data": {"services": {}}},
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "bridge_service",
+    "terminal": true
+  },
+  "synthetic_response": {
+    "role": "bridge_service",
+    "terminal": true,
+    "stop_reason": "Reached Bridgers (type=other + subtype=Bridge) — trigger bridge_analyze for destination chain",
+    "labels": ["Bridgers", "Bridge"],
+    "notes": "owner.type=other with subtype=Bridge routes to bridge_service so the tracer continues on the destination chain via bridge_analyze.",
+    "service_label": "Bridgers",
+    "protocol": "bridgers"
+  }
+}

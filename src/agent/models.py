@@ -30,6 +30,11 @@ class TracerConfig(BaseModel):
     stolen_amount: float | None = Field(default=None, ge=0)
     cex_single_cluster_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
     traced_amount_tolerance: float = Field(default=0.03, ge=0.0, le=1.0)
+    # Minimum FIFO-attributed share (as a fraction of stolen_amount) for a
+    # hop to be worth pushing onto the scheduler. Branches whose attributed
+    # share falls below this get their step recorded and stop_reason
+    # "Below dust threshold"; we don't chase them further. 0.0 disables.
+    min_path_attribution_ratio: float = Field(default=0.01, ge=0.0, le=1.0)
 
     @field_validator("blockchain_name")
     @classmethod
@@ -60,6 +65,27 @@ class CaseMeta(BaseModel):
     token_id: int | None = None
     approx_date: str | None = None
 
+class DecisionRef(BaseModel):
+    """Pointer to a single LLM decision captured during tracing.
+
+    Attached to every ``Step`` created under an LLM call and to the
+    top-level ``TraceResult.decision_log`` for global decisions (e.g.
+    validator, seed-tx selection). The ``input_hash`` makes the decision
+    replayable; ``usage`` + ``reasoning_tokens`` make it costable.
+    """
+    prompt_name: str
+    prompt_version: str = "v1"
+    model: str
+    family: Literal["reasoning", "standard"] | str
+    reasoning_effort: str | None = None
+    input_hash: str
+    output_summary: dict = Field(default_factory=dict)
+    usage: dict = Field(default_factory=dict)
+    latency_ms: int = 0
+    decision_id: str
+    from_replay: bool = False
+
+
 class Step(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -77,6 +103,7 @@ class Step(BaseModel):
     protocol: str | None = None
     reasoning: str | None = None  # Explanation for why this transaction was selected
     attributed_amount: float | None = None  # FIFO-attributed theft-origin share
+    llm_decisions: list[DecisionRef] = Field(default_factory=list)
 
 class Path(BaseModel):
     path_id: str
@@ -115,6 +142,7 @@ class TraceResult(BaseModel):
     annotations: list[Annotation]
     trace_stats: TraceStats
     visualization_url: str | None = None
+    decision_log: list[DecisionRef] = Field(default_factory=list)
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2, by_alias=True)

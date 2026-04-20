@@ -37,8 +37,45 @@ from agent.mcp_client import MCPClient
 from agent.mcp_http_client import MCPHTTPClient
 from agent.mcp_tracer import MCPTracer
 from agent.models import TracerConfig, TraceResult
+from agent.recorder import (
+    TraceRecorder,
+    default_recordings_dir,
+    should_record,
+    should_record_reasoning,
+)
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
+
+
+def _maybe_make_recorder(
+    trace_id: str, config: "TracerConfig | None" = None,
+) -> TraceRecorder | None:
+    """Return a recorder when ``AGENT_RECORD`` is set, else ``None``.
+
+    Kept here rather than in the tracer constructor because the API needs
+    to share the ``trace_id`` with its outer observability span; passing
+    it in is cleaner than making BaseTracer pick one.
+
+    When ``config`` is supplied we prime the recorder's filename context
+    immediately so the output path reflects chain / asset / tx_hash from
+    the first write.
+    """
+    if not should_record():
+        return None
+    recorder = TraceRecorder(
+        trace_id=trace_id,
+        out_dir=default_recordings_dir(),
+        record_reasoning=should_record_reasoning(),
+    )
+    if config is not None:
+        recorder.set_context(
+            chain=getattr(config, "blockchain_name", None),
+            asset=getattr(config, "asset_symbol", None)
+            or getattr(config, "theft_asset", None),
+            tx_hash=getattr(config, "tx_hash", None),
+            victim_address=getattr(config, "victim_address", None),
+        )
+    return recorder
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -547,9 +584,11 @@ async def _run_trace_http(
     http_client = MCPHTTPClient(mcp_server_url, user_id)
     viz_client = None
 
+    recorder = _maybe_make_recorder(trace_id, config)
     try:
         with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
             tracer = HTTPTracer(http_client)
+            tracer.recorder = recorder
             progress_queue = asyncio.Queue()
 
             async def on_progress(message: str):
@@ -642,6 +681,10 @@ async def _run_trace_http(
         if viz_client:
             close_tasks.append(viz_client.aclose())
         await asyncio.gather(*close_tasks, return_exceptions=True)
+        if recorder is not None:
+            rec_path = recorder.close()
+            if rec_path is not None:
+                logger.info("recording saved to %s", rec_path)
 
 
 async def _run_trace_stdio(
@@ -660,6 +703,7 @@ async def _run_trace_stdio(
     }) + "\n"
 
     viz_client = None
+    recorder = _maybe_make_recorder(trace_id, config)
 
     with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
         async with MCPServerStdio(
@@ -672,6 +716,7 @@ async def _run_trace_stdio(
         ) as server:
             client = MCPClient(server)
             tracer = MCPTracer(client)
+            tracer.recorder = recorder
             progress_queue = asyncio.Queue()
 
             async def on_progress(message: str):
@@ -757,6 +802,10 @@ async def _run_trace_stdio(
             finally:
                 if viz_client:
                     await viz_client.aclose()
+                if recorder is not None:
+                    rec_path = recorder.close()
+                    if rec_path is not None:
+                        logger.info("recording saved to %s", rec_path)
 
 
 async def _extract_continuation_options_http(

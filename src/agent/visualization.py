@@ -43,46 +43,33 @@ def _token_id_from_descriptor(desc: str | None) -> int | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _load_currency_db() -> dict[tuple[str, int], dict[str, Any]]:
-    """Load ``src/currencies.json`` once and index it by ``(chain, token_id)``.
-
-    Returns a mapping from normalized ``(chain, token_id)`` to the full
-    currency record (``name``/``symbol``/``unit``/``issuer``).
-    """
-    path = Path(__file__).resolve().parents[1] / "currencies.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.warning("Could not load currencies.json: %s", exc)
-        return {}
-
-    out: dict[tuple[str, int], dict[str, Any]] = {}
-    for item in raw if isinstance(raw, list) else []:
-        chain = (item.get("currency") or "").strip().lower()
-        tid = item.get("token_id")
-        if not chain or tid is None:
-            continue
-        # Skip testnets — they share symbols with mainnets and would shadow them.
-        if "testnet" in chain:
-            continue
-        try:
-            key = (chain, int(tid))
-        except (TypeError, ValueError):
-            continue
-        # Prefer the first hit for native (token_id == 0) so mainnet wins.
-        out.setdefault(key, item)
-    return out
-
-
 def _lookup_currency(chain: str, token_id: int) -> dict[str, Any] | None:
-    """Return the currencies.json record for ``(chain, token_id)`` or None."""
+    """Return the currencies.json record for ``(chain, token_id)`` or None.
+
+    Thin adapter over :mod:`agent.currency_registry` — the registry owns
+    the hash-table, this function shapes the result as the legacy dict
+    callers already expect.
+    """
     if not chain:
         return None
-    return _load_currency_db().get((chain.lower(), int(token_id)))
+    from .currency_registry import get_registry
+    rec = get_registry().lookup(chain, token_id)
+    if rec is None:
+        return None
+    return {
+        "currency": rec.chain,
+        "issuer": rec.issuer,
+        "name": rec.name,
+        "symbol": rec.symbol,
+        "token_id": rec.token_id,
+        "unit": rec.unit,
+    }
 
 
-# Fallback tables used when the token isn't in currencies.json.
+# Fallback tables used when the token isn't in currencies.json. Kept in
+# sync with _EVM_NATIVE_CHAINS defaults in base_tracer; BTC-family is 8.
+# Registry wins whenever it has an entry, so these only fire for chains
+# we haven't yet indexed.
 _NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
 _TOKEN_UNIT_MAP = {
     "USDT": 6, "USDC": 6, "DAI": 18, "BUSD": 18,
@@ -437,6 +424,16 @@ def generate_visualization_payload(
                     token_id_by_hash[h] = int(tid)
                 except (TypeError, ValueError):
                     pass
+        # Backfill display-name fields on entries coming from
+        # ``_collect_token_transfer_data`` (they only carry the short
+        # chain code). The frontend sidebar reads ``blockchain`` /
+        # ``blockchain_name`` for the "Blockchain: …" row; without
+        # these, it renders the "MOCK DATA" sentinel.
+        if not tx.get("blockchain"):
+            tx_chain = _normalize_chain(tx.get("currency") or "")
+            tx["blockchain"] = _CURRENCY_NAMES.get(tx_chain, tx_chain.upper() if tx_chain else "")
+        if not tx.get("blockchain_name"):
+            tx["blockchain_name"] = tx.get("blockchain") or ""
     # Also harvest token_id from the pre-built ``txs`` list (populated by
     # ``_collect_token_transfer_data`` in base_tracer). That path is the one
     # that actually fires for in-trace resolved token hops, so it covers
@@ -495,9 +492,31 @@ def generate_visualization_payload(
 
     service_comment_map = {}
     ren_counter = 0
+    # Postprocess (``trace_postprocess.ensure_entity``) rekeys entities by
+    # ``(address, chain)`` and auto-adds an ``intermediate`` Entity for each
+    # chain an address touches. On a cross-chain bridge hop that means the
+    # bridge contract gets TWO Entity rows: ``(Bridgers, eth, bridge_service)``
+    # from the tracer and ``(Bridgers, trx, intermediate)`` from postprocess.
+    # The second one must not clobber or duplicate the bridge's label, so we
+    # only consult the authoritative entity per address here.
+    _comment_worthy_roles = {
+        "victim", "perpetrator", "bridge_service",
+        "cex_deposit", "otc_service", "unidentified_service",
+    }
+    _role_priority = {
+        "victim": 5, "perpetrator": 4,
+        "bridge_service": 4, "cex_deposit": 4,
+        "otc_service": 4, "unidentified_service": 4,
+        "intermediate": 1,
+    }
+    _best_entity_by_addr: dict[str, Entity] = {}
     for entity in trace_result.entities:
-        if entity.role in {"victim", "perpetrator", "bridge_service", "cex_deposit", "otc_service", "unidentified_service"}:
-            service_comment_map[entity.address] = f"«ren»{ren_counter}"
+        cur = _best_entity_by_addr.get(entity.address)
+        if cur is None or _role_priority.get(entity.role, 0) > _role_priority.get(cur.role, 0):
+            _best_entity_by_addr[entity.address] = entity
+    for address, entity in _best_entity_by_addr.items():
+        if entity.role in _comment_worthy_roles:
+            service_comment_map[address] = f"«ren»{ren_counter}"
             ren_counter += 1
 
     # --- Pass 1: Build Graph Topology & Weights ---
@@ -553,10 +572,23 @@ def generate_visualization_payload(
     # Collect unique steps across all paths.  Paths share common prefixes so
     # the same (from, to, tx_hash) triple can appear many times; we keep only
     # the first occurrence to avoid duplicate edges in the visualization.
+    #
+    # Drop the terminal step of any path trimmed below the dust threshold —
+    # operator feedback is that those edges add clutter without decision
+    # value (they represent <1% of stolen funds going to some random
+    # address). The step is still present in ``trace_result.paths`` for
+    # API consumers and the "Dust Trimmed" annotation still describes
+    # what happened; only the visualization hides it.
     _step_keys_seen: set[tuple[str, str, str]] = set()
     all_steps = []
     for path in trace_result.paths:
-        for step in path.steps:
+        stop_reason = (path.stop_reason or "").lower()
+        is_dust_path = stop_reason.startswith("below dust threshold")
+        steps_to_render = path.steps
+        if is_dust_path and path.steps:
+            # Last step is the one into the dust recipient — drop it.
+            steps_to_render = path.steps[:-1]
+        for step in steps_to_render:
             key = (step.from_address, step.to_address, step.tx_hash or "")
             if key not in _step_keys_seen:
                 _step_keys_seen.add(key)
@@ -595,6 +627,27 @@ def generate_visualization_payload(
                 if desc_tid is not None and tx_hash not in token_id_by_hash:
                     token_id_by_hash[tx_hash] = desc_tid
     tx_desc_seen: set[str] = set()
+    # For UTXO multi-output seed txs, a single on-chain tx (one tx_hash)
+    # produces many steps with distinct (from, to) pairs. Each step emits
+    # a `src→tx` and a `tx→tgt` edge; without deduping by (src, tx_hash)
+    # we'd repeat the same `src→tx` edge once per output.
+    #
+    # We key on tx_hash (not tx_desc) because some steps synthesize a
+    # per-index descriptor when ``tx_desc_by_hash`` is missing an entry
+    # — the hash itself is the real aggregation key.
+    src_to_tx_seen: set[tuple[str, str]] = set()
+
+    # Pre-count how many rendered steps reference each tx_hash. A tx_hash
+    # that appears in exactly one step is an account-model transfer (one
+    # input, one output, one step), and ``amount_by_hash`` is already in
+    # the API's base-unit — we trust it as-is and skip our own scaling
+    # (avoids double-scaling ETH gwei → wei).
+    # Multi-output UTXO seeds appear in multiple steps with the same hash
+    # but different ``to`` addresses; those need per-output scaling.
+    step_count_by_hash: dict[str, int] = {}
+    for s in all_steps:
+        if s.tx_hash:
+            step_count_by_hash[s.tx_hash] = step_count_by_hash.get(s.tx_hash, 0) + 1
 
     for step in all_steps:
         chain = _normalize_chain(step.chain)
@@ -794,47 +847,92 @@ def generate_visualization_payload(
 
         fiat_rate = fiat_rate_by_hash.get(step.tx_hash, 1.0) if step.tx_hash else 1.0
 
-        # Resolve a concrete edge amount so the frontend never has to render
-        # "NaN" when its internal hash→txList lookup misses (as it does for
-        # e.g. bridge/swap dst txs or USDT-contract pseudo-destinations).
-        # Unit scaling uses ``edge_token_id`` (the tx's real token) so a
-        # 413.759798 USDT estimate becomes 413759798 (×10^6), not
-        # 413759798000 (×10^9, which is what happens if we use the native
-        # ETH unit for a USDT hop).
-        edge_amount: Any = None
-        if step.tx_hash and step.tx_hash in amount_by_hash:
-            edge_amount = amount_by_hash[step.tx_hash]
-        elif step.amount_estimate:
-            rec = _lookup_currency(chain, edge_token_id)
-            unit = (rec.get("unit") if rec else None)
-            if unit is None:
-                unit = _NATIVE_UNIT_MAP.get(chain, 6) if edge_token_id == 0 else 6
-            try:
-                edge_amount = int(float(step.amount_estimate) * (10 ** int(unit)))
-            except (TypeError, ValueError, OverflowError):
-                edge_amount = None
+        # Edge amounts split between the src→tx and tx→tgt legs to handle
+        # UTXO multi-output seeds correctly:
+        #
+        #   * src→tx : total tx amount (aggregate across all outputs). We
+        #              prefer ``amount_by_hash`` because it reflects the
+        #              real on-chain tx value.
+        #   * tx→tgt : per-output share. We prefer ``step.amount_estimate``
+        #              so each output edge carries its own size. Without
+        #              this, a 7-output UTXO seed with 36.5M sat total
+        #              would draw 7 edges of 36.5M each instead of their
+        #              individual outputs (17.9M + 2M + 0.7M + …).
+        #
+        # For account-model chains both values coincide, so the split
+        # is a no-op there. Unit scaling uses ``edge_token_id`` (the tx's
+        # real token) so a 413.759798 USDT estimate becomes 413759798
+        # (×10^6), not 413759798000 (×10^9, which is what would happen
+        # if we used the native ETH unit for a USDT hop).
+        rec = _lookup_currency(chain, edge_token_id)
+        unit = (rec.get("unit") if rec else None)
+        if unit is None:
+            unit = _NATIVE_UNIT_MAP.get(chain, 6) if edge_token_id == 0 else 6
 
-        connects.append({
-            "source": src_desc,
-            "target": tx_desc,
-            "data": {
-                "currency": chain,
-                "amount": edge_amount,
-                "fiatRate": fiat_rate,
-                "token_id": edge_token_id,
-                "color": edge_color,
-                "type": "straight",
-                "isNew": True,
-                "isNeedReverse": False,
-                "hovered": False
-            }
-        })
+        per_step_amount: Any = None
+        if step.amount_estimate is not None:
+            try:
+                per_step_amount = int(float(step.amount_estimate) * (10 ** int(unit)))
+            except (TypeError, ValueError, OverflowError):
+                per_step_amount = None
+
+        total_tx_amount: Any = None
+        if step.tx_hash and step.tx_hash in amount_by_hash:
+            total_tx_amount = amount_by_hash[step.tx_hash]
+
+        # Account-model txs (single step per tx_hash) trust amount_by_hash
+        # because the API's base-unit representation is canonical. We
+        # never do our own unit scaling for them — otherwise values that
+        # are already in wei/sun/sat get multiplied a second time (the
+        # ETH gwei → wei regression we're patching here).
+        #
+        # Only UTXO multi-output seeds (same tx_hash, multiple distinct
+        # (from, to) steps) need per-output scaling, because
+        # ``amount_by_hash`` holds the tx aggregate but each step carries
+        # its own output-share in display units.
+        is_multi_output = (
+            step.tx_hash is not None
+            and step_count_by_hash.get(step.tx_hash, 0) > 1
+        )
+
+        if total_tx_amount is not None and not is_multi_output:
+            # Account-model: trust the API value verbatim, no scaling.
+            src_edge_amount = total_tx_amount
+            tgt_edge_amount = total_tx_amount
+        else:
+            # UTXO multi-output (or account tx with no amount_by_hash
+            # entry — rare, e.g. synthetic bridge-destination hashes).
+            src_edge_amount = total_tx_amount if total_tx_amount is not None else per_step_amount
+            tgt_edge_amount = per_step_amount if per_step_amount is not None else total_tx_amount
+        # Back-compat alias: the txList-fallback block below references
+        # ``edge_amount`` as a single post-resolution amount for the step.
+        # Use the per-output share (what the edge actually carries).
+        edge_amount = tgt_edge_amount
+
+        src_tx_key = (src_desc, step.tx_hash or tx_desc)
+        if src_tx_key not in src_to_tx_seen:
+            src_to_tx_seen.add(src_tx_key)
+            connects.append({
+                "source": src_desc,
+                "target": tx_desc,
+                "data": {
+                    "currency": chain,
+                    "amount": src_edge_amount,
+                    "fiatRate": fiat_rate,
+                    "token_id": edge_token_id,
+                    "color": edge_color,
+                    "type": "straight",
+                    "isNew": True,
+                    "isNeedReverse": False,
+                    "hovered": False
+                }
+            })
         connects.append({
             "source": tx_desc,
             "target": tgt_desc,
             "data": {
                 "currency": chain,
-                "amount": edge_amount,
+                "amount": tgt_edge_amount,
                 "fiatRate": fiat_rate,
                 "token_id": edge_token_id,
                 "color": edge_color,
@@ -875,6 +973,13 @@ def generate_visualization_payload(
         if not use_provided_tx_list or is_synthetic_hash or is_missing_hash:
             if tx_hash:
                 provided_tx_hashes.add(tx_hash)
+            # Human-readable blockchain name — frontend's tx-sidebar
+            # looks this up directly to render "Blockchain: TRON" etc.
+            # Without it, the card falls back to a sentinel ("MOCK
+            # DATA") even when we have a fully valid currency/tokenId
+            # resolution. Keep ``currency`` as the short chain code for
+            # any downstream that joins by it.
+            chain_display = _CURRENCY_NAMES.get(chain, chain.upper() if chain else "")
             tx_list_inputs.append({
                 "inputs": [{"address": step.from_address, "riskscore": address_to_entity.get(step.from_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
                 "outputs": [{"address": step.to_address, "riskscore": address_to_entity.get(step.to_address, Entity(address="",chain="",role="intermediate",risk_score=0.0)).risk_score or 0.0, "type": "address"}],
@@ -886,6 +991,8 @@ def generate_visualization_payload(
                 ),
                 "currency": chain,
                 "tokenId": edge_token_id,
+                "blockchain": chain_display,
+                "blockchain_name": chain_display,
                 "poolTime": _get_timestamp(step.time),
                 "date": _get_timestamp(step.time),
                 "path": tx_path,
@@ -903,6 +1010,49 @@ def generate_visualization_payload(
                 token_id=edge_token_id,
                 asset_hint=(step.asset or "").upper(),
             )
+
+    # --- Cross-chain bridge handoff connectors ---
+    # For each ``bridge_transfer`` step, the tracer emits the step on the
+    # *destination* chain (chain=dst), with ``from_address`` set to the
+    # bridge contract's on-source-chain address. Visualization therefore
+    # creates two nodes for the same bridge contract — one on the source
+    # chain (rendered from the upstream hop) and one on the destination
+    # chain (rendered from this step). Without an explicit link between
+    # them the two Bridgers nodes float as disconnected components on
+    # the graph. Draw a dashed cross-chain connector so operators see
+    # the same contract on both chains.
+    bridge_handoff_seen: set[tuple[str, str]] = set()
+    for step in all_steps:
+        if (step.step_type or "") != "bridge_transfer":
+            continue
+        bridge_addr = step.from_address
+        if not bridge_addr:
+            continue
+        dst_chain = _normalize_chain(step.chain)
+        addr_prefix = f"{bridge_addr}-"
+        candidates = [d for d in added_descriptors if d.startswith(addr_prefix)]
+        dst_descriptors = [d for d in candidates if d.startswith(f"{bridge_addr}-{dst_chain}-")]
+        other_descriptors = [d for d in candidates if not d.startswith(f"{bridge_addr}-{dst_chain}-")]
+        if not dst_descriptors or not other_descriptors:
+            continue
+        src_d = sorted(other_descriptors)[0]
+        tgt_d = sorted(dst_descriptors)[0]
+        key = (src_d, tgt_d)
+        if key in bridge_handoff_seen:
+            continue
+        bridge_handoff_seen.add(key)
+        connects.append({
+            "source": src_d,
+            "target": tgt_d,
+            "data": {
+                "color": "#77869E",
+                "type": "dashed",
+                "isNew": True,
+                "isNeedReverse": False,
+                "hovered": False,
+                "label": "Bridge",
+            },
+        })
 
     # --- Generate autoTxs ---
     auto_txs = []
@@ -960,20 +1110,69 @@ def generate_visualization_payload(
     # classifier never actually identified as a service. We keep the role
     # honest (``intermediate`` stays ``intermediate``) and instead pick a
     # comment label based on *why* the path stopped.
+    # Any address that appears as a ``from_address`` on at least one
+    # rendered step has outgoing edges — it's an intermediate node, not a
+    # terminal leaf, regardless of whether *some* path happens to stop
+    # there. Operator feedback: labeling such nodes "Destination address"
+    # is confusing because the graph clearly shows the trace continuing
+    # through them. Only label true leaves (no outgoing edges anywhere).
+    addrs_with_outgoing: set[str] = set()
+    for _s in all_steps:
+        if _s.from_address:
+            addrs_with_outgoing.add(_s.from_address)
+
     terminal_stop_reasons: dict[str, str] = {}
     for path in trace_result.paths:
         if not path.steps:
             continue
-        leaf = path.steps[-1].to_address
         reason = (path.stop_reason or "").strip()
+        # Mirror the dust filter above: dust-trimmed paths had their
+        # terminal step removed from the render, so their dust recipient
+        # is no longer a graph node. Don't resurrect it as a comment.
+        if reason.lower().startswith("below dust threshold"):
+            continue
+        leaf = path.steps[-1].to_address
+        if leaf in addrs_with_outgoing:
+            # This address is a through-node on another (rendered) path.
+            continue
         if leaf not in terminal_stop_reasons or reason:
             terminal_stop_reasons[leaf] = reason
 
-    for addr, _reason in terminal_stop_reasons.items():
+    # Address types that warrant a dust-endpoint label. Operator feedback:
+    # putting "Trace endpoint (dust amount)" on a plain unknown address
+    # is noise — the bubble only makes sense when the dust lands on an
+    # identified service, because that's the part of the story worth
+    # surfacing ("dust went to <exchange/bridge/OTC>"). For a blank
+    # intermediate leaf we just leave the node unlabeled.
+    _SERVICE_ROLES_FOR_DUST_LABEL = {
+        "cex_deposit", "bridge_service", "dex_service",
+        "otc_service", "unidentified_service",
+    }
+
+    def _is_service_or_identified(addr: str) -> bool:
+        entity = address_to_entity.get(addr)
+        if entity is None:
+            return False
+        if entity.role in _SERVICE_ROLES_FOR_DUST_LABEL:
+            return True
+        # ``owner`` lives in the legacy label block for some entities —
+        # treat any non-empty owner-like label as "identified".
+        if entity.labels:
+            meaningful = [lb for lb in entity.labels if lb not in _META_LABELS]
+            if meaningful:
+                return True
+        return False
+
+    for addr, reason in terminal_stop_reasons.items():
         if addr in service_comment_map:
             continue
         entity = address_to_entity.get(addr)
         if entity and entity.role in {"victim", "perpetrator"}:
+            continue
+        # Dust-endpoint label is a service-specific signal; if the leaf
+        # is a plain unknown address, don't add a comment at all.
+        reason_lower = (reason or "").lower()
+        if "dust" in reason_lower and not _is_service_or_identified(addr):
             continue
         service_comment_map[addr] = f"«ren»{ren_counter}"
         ren_counter += 1
@@ -1006,12 +1205,37 @@ def generate_visualization_payload(
         "unidentified_service": "Suspected unidentified service",
         "intermediate": "Destination address",
     }
+    _comment_emitted: set[str] = set()
     for entity in trace_result.entities:
         if entity.address not in service_comment_map:
             continue
+        # One comment per address — postprocess may have created several
+        # Entity rows for the same address on different chains.
+        if entity.address in _comment_emitted:
+            continue
+        # Use the authoritative entity (highest role priority) so the label
+        # reflects e.g. ``bridge_service`` rather than the auto-added
+        # ``intermediate`` twin.
+        entity = _best_entity_by_addr.get(entity.address, entity)
+        _comment_emitted.add(entity.address)
         comment_desc = service_comment_map[entity.address]
-        token_id = token_id_map.get((_normalize_chain(entity.chain), (trace_result.case_meta.asset_symbol or "").upper()), 0)
-        address_desc = _get_descriptor(entity.address, _normalize_chain(entity.chain), token_id)
+        # Anchor the comment on a node that actually exists among the items.
+        # ``entity.chain`` is frozen at trace-entry (often the seed chain),
+        # and ``case_meta.asset_symbol`` picks the wrong token_id for
+        # destination-chain nodes on a cross-chain bridge, which left the
+        # «ren» connector dangling at (0,0) with a default-position offset.
+        entity_chain_norm = _normalize_chain(entity.chain)
+        addr_prefix = f"{entity.address}-"
+        real_descriptors = sorted(d for d in added_descriptors if d.startswith(addr_prefix))
+        own_chain_prefix = f"{entity.address}-{entity_chain_norm}-"
+        matching = [d for d in real_descriptors if d.startswith(own_chain_prefix)]
+        if matching:
+            address_desc = matching[0]
+        elif real_descriptors:
+            address_desc = real_descriptors[0]
+        else:
+            token_id = token_id_map.get((entity_chain_norm, (trace_result.case_meta.asset_symbol or "").upper()), 0)
+            address_desc = _get_descriptor(entity.address, entity_chain_norm, token_id)
         pos = positions.get(address_desc, {"x": 0, "y": 0})
         real_labels = [lb for lb in (entity.labels or []) if lb not in _META_LABELS]
         # Prefer owner name from txList (e.g. "n.exchange") over generic role label
@@ -1022,15 +1246,24 @@ def generate_visualization_payload(
         if not owner_name and real_labels:
             owner_name = real_labels[0]
 
+        # When the path stopped because of dust AND the leaf is a real
+        # service, we keep the service identity AND tack on a
+        # "(dust amount)" suffix so operators can tell "dust reached
+        # Binance" apart from a regular full-flow Binance deposit.
+        reason_for_addr = (terminal_stop_reasons.get(entity.address) or "").lower()
+        dust_suffix = "\n(dust amount)" if "dust" in reason_for_addr else ""
+
         if owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}:
             role_suffix = role_labels.get(entity.role, "")
-            label = f"{owner_name}\n{role_suffix}" if role_suffix else owner_name
+            core = f"{owner_name}\n{role_suffix}" if role_suffix else owner_name
+            label = core + dust_suffix
         elif entity.role == "intermediate" and entity.address in terminal_stop_reasons:
             # Terminal intermediate: pick a label that reflects *why* the
             # trace stopped instead of pretending it's a CEX deposit.
             label = owner_name or _intermediate_label_for(entity.address)
         else:
-            label = role_labels.get(entity.role) or (owner_name if owner_name else entity.role.replace("_", " ").title())
+            base = role_labels.get(entity.role) or (owner_name if owner_name else entity.role.replace("_", " ").title())
+            label = base + dust_suffix
         has_owner_prefix = owner_name and entity.role in {"cex_deposit", "bridge_service", "otc_service", "unidentified_service"}
         line_count = label.count("\n") + 1
         if line_count >= 3 or (has_owner_prefix and line_count >= 2):

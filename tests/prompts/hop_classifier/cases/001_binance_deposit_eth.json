@@ -1,0 +1,44 @@
+{
+  "name": "001_binance_deposit_eth",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v1",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+    "chain": "eth",
+    "asset": "USDT",
+    "incoming_tx_hash": "0xabc",
+    "incoming_amount": 50000.0,
+    "get_address": {
+      "data": {
+        "owner": {
+          "name": "Binance",
+          "slug": "binance",
+          "subtype": "exchange_deposit"
+        },
+        "riskscore": 0.22
+      }
+    },
+    "get_extra_address_info": {
+      "data": {
+        "services": {"use_platform": ["Binance"]}
+      }
+    },
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "cex_deposit",
+    "terminal": true,
+    "labels": ["Binance"]
+  },
+  "synthetic_response": {
+    "role": "cex_deposit",
+    "terminal": true,
+    "stop_reason": "Reached Binance deposit address",
+    "labels": ["Binance", "CEX"],
+    "notes": null,
+    "service_label": "Binance",
+    "protocol": null
+  }
+}

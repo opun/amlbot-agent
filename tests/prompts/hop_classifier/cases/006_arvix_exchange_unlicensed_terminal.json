@@ -1,0 +1,40 @@
+{
+  "name": "006_arvix_exchange_unlicensed_terminal",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v2",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "TE4U4pKBBvdg6rNYJy4W3tuZ5PEn8NyeUS",
+    "chain": "trx",
+    "asset": "USDT",
+    "incoming_tx_hash": "81b1d080d67e15e70e3ca95ee9ec2c2d82cf1b88ccde9e35f6e28bad813780e3",
+    "incoming_amount": 141069.0,
+    "get_address": {
+      "data": {
+        "owner": {
+          "name": "Arvix.pro(abcex.io)",
+          "slug": "Arvix.proabcex.io",
+          "type": "exchange_unlicensed",
+          "subtype": null
+        },
+        "riskscore": 0.6
+      }
+    },
+    "get_extra_address_info": {"data": {"services": {}}},
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "cex_deposit",
+    "terminal": true
+  },
+  "synthetic_response": {
+    "role": "cex_deposit",
+    "terminal": true,
+    "stop_reason": "Reached Arvix.pro exchange deposit (exchange_unlicensed)",
+    "labels": ["Arvix.pro(abcex.io)", "CEX"],
+    "notes": "owner.type=exchange_unlicensed triggers structural CEX terminal.",
+    "service_label": "Arvix.pro(abcex.io)",
+    "protocol": null
+  }
+}

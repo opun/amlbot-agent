@@ -4,6 +4,7 @@ import os
 import sys
 import termios
 import time
+from pathlib import Path
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStdio
@@ -11,6 +12,12 @@ from agents.mcp import MCPServerStdio
 from agent.mcp_client import MCPClient
 from agent.mcp_tracer import MCPTracer
 from agent.models import TracerConfig
+from agent.recorder import (
+    TraceRecorder,
+    default_recordings_dir,
+    should_record,
+    should_record_reasoning,
+)
 from agent.reporting import build_report
 from agent.theft_detection import parse_case_description_with_llm
 
@@ -33,7 +40,10 @@ async def run_trace(
     theft_asset: str | None = None,
     stolen_amount: float | None = None,
     cex_single_cluster_threshold: float | None = None,
-    traced_amount_tolerance: float | None = None
+    traced_amount_tolerance: float | None = None,
+    *,
+    replay_path: Path | None = None,
+    record: bool = False,
 ):
     if victim_address and tx_hash:
         print(f"Starting trace for transaction {tx_hash} (victim: {victim_address}) on {blockchain}...")
@@ -67,6 +77,31 @@ async def run_trace(
         with trace(workflow_name="Crypto Tracer Agent " + str(time.time()), trace_id=trace_id):
             client = MCPClient(server)
             tracer = MCPTracer(client)
+
+            # Wire recorder: replay takes precedence over recording. When
+            # both are requested, we replay from the source file and
+            # simultaneously record mutated events into a new file — that
+            # is what lets --override-prompt experiments land somewhere.
+            recorder: TraceRecorder | None = None
+            recording_out = default_recordings_dir() if record else None
+            if replay_path is not None:
+                recorder = TraceRecorder.for_replay(
+                    replay_path,
+                    out_dir=recording_out,
+                    trace_id=trace_id,
+                    record_reasoning=should_record_reasoning(),
+                )
+                print(f"Replaying from: {replay_path}")
+            elif record:
+                recorder = TraceRecorder(
+                    trace_id=trace_id,
+                    out_dir=recording_out,
+                    record_reasoning=should_record_reasoning(),
+                )
+                # Filename materialized lazily on first event, so we
+                # don't print the path here — it's printed after
+                # ``set_context`` once chain/asset/tx_hash are known.
+            tracer.recorder = recorder
 
             # Parse case description with LLM if provided
             parsed_info = {}
@@ -112,8 +147,22 @@ async def run_trace(
                 config_kwargs["traced_amount_tolerance"] = traced_amount_tolerance
             config = TracerConfig(**config_kwargs)
 
+            if recorder is not None and recorder.is_recording:
+                recorder.set_context(
+                    chain=final_blockchain,
+                    asset=final_asset or final_theft_asset,
+                    tx_hash=final_tx_hash,
+                    victim_address=final_victim_address,
+                )
+
             print("Running tracer...")
-            result = await tracer.trace(config)
+            try:
+                result = await tracer.trace(config)
+            finally:
+                if recorder is not None:
+                    rec_path = recorder.close()
+                    if rec_path is not None:
+                        print(f"✓ Recording saved to: {rec_path}")
 
             print("Building report...")
             report = build_report(result)
@@ -144,7 +193,35 @@ async def run_trace(
 
             print("\nDone.")
 
+def _extract_flag_value(flag: str) -> str | None:
+    """Pop ``--flag value`` out of ``sys.argv`` if present; return the value or None.
+
+    Doing this before the positional-argument parser lets flags appear in
+    any position without breaking the existing ``sys.argv[1], sys.argv[2]``
+    indexing below.
+    """
+    if flag not in sys.argv:
+        return None
+    idx = sys.argv.index(flag)
+    value = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+    del sys.argv[idx:idx + 2]
+    return value
+
+
+def _extract_bool_flag(flag: str) -> bool:
+    if flag not in sys.argv:
+        return False
+    sys.argv.remove(flag)
+    return True
+
+
 def main():
+    # --replay, --record are consumed before positional parsing so they
+    # can appear in any position on the command line.
+    replay_value = _extract_flag_value("--replay")
+    replay_path = Path(replay_value) if replay_value else None
+    record_flag = _extract_bool_flag("--record") or should_record()
+
     # Check if running in interactive mode (no args provided)
     if len(sys.argv) < 3:
         print("Crypto Tracer Agent - Interactive Mode")
@@ -278,7 +355,9 @@ def main():
                 date=date,
                 tx_hashes=tx_hashes,
                 tx_hash=tx_hash,
-                theft_asset=theft_asset
+                theft_asset=theft_asset,
+                replay_path=replay_path,
+                record=record_flag,
             ))
 
         except KeyboardInterrupt:
@@ -326,7 +405,9 @@ def main():
             date=date,
             tx_hashes=tx_hashes,
             tx_hash=tx_hash,
-            theft_asset=theft_asset
+            theft_asset=theft_asset,
+            replay_path=replay_path,
+            record=record_flag,
         ))
 
 if __name__ == "__main__":

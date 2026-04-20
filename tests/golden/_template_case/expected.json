@@ -1,0 +1,14 @@
+{
+  "_comment": "Only fill in the fields your case cares about. Unspecified metrics short-circuit to ok.",
+  "terminal_addresses": [
+    "0x0000000000000000000000000000000000000001"
+  ],
+  "paths_min": 1,
+  "paths_max": 3,
+  "traced_amount": 50000.0,
+  "traced_tolerance": 0.05,
+  "chains": ["eth"],
+  "entity_roles": {
+    "0x0000000000000000000000000000000000000001": "cex_deposit"
+  }
+}

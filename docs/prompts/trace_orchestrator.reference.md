@@ -1,3 +1,11 @@
+# Trace orchestrator — historical reference
+
+> **Status:** Reference only. Not loaded by any runtime path.
+>
+> The actual tracing loop is implemented in `src/agent/base_tracer.py::_run_agentic_trace` as a Python state machine. The live LLM decision points are `trace_hop_classifier.md`, `trace_hop_selector.md`, and `trace_validator.md`. This document captures the original rules the hybrid architecture enforces in code; keep it in sync when changing classification, accumulation, or terminal-detection logic.
+
+---
+
 # Blockchain Tracing Agent Instructions
 
 ## Task

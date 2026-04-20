@@ -1,0 +1,24 @@
+{
+  "name": "003_null_incoming_picks_first",
+  "prompt_name": "hop_selector",
+  "prompt_version": "v1",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "chain": "eth",
+    "asset": "USDT",
+    "incoming_amount": null,
+    "incoming_time": null,
+    "txs": [
+      {"hash": "0xFIRST", "amount_coerced": 12345, "block_time": 1700000000, "token_id": 94252, "type": "withdrawal"},
+      {"hash": "0xSECOND", "amount_coerced": 67890, "block_time": 1700000001, "token_id": 94252, "type": "withdrawal"}
+    ]
+  },
+  "expected": {
+    "selected_hashes": ["0xFIRST"]
+  },
+  "synthetic_response": {
+    "selected_hashes": ["0xFIRST"],
+    "reasoning": "incoming_amount is null — pick first transaction."
+  }
+}

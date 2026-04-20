@@ -1,0 +1,40 @@
+{
+  "name": "004_tronify_other_terminal",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v2",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "TDii6vao7xyWg2rKPbCPWVRpSmne8xcqYx",
+    "chain": "trx",
+    "asset": "USDT",
+    "incoming_tx_hash": "28e0330016a058592d4b7f50c290fd9f9fef798659ea0744ed304e9faad3e65b",
+    "incoming_amount": 3.64,
+    "get_address": {
+      "data": {
+        "owner": {
+          "name": "Tronify",
+          "slug": "Tronify",
+          "type": "other",
+          "subtype": null
+        },
+        "riskscore": 0.25
+      }
+    },
+    "get_extra_address_info": {"data": {"services": {}}},
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "unidentified_service",
+    "terminal": true
+  },
+  "synthetic_response": {
+    "role": "unidentified_service",
+    "terminal": true,
+    "stop_reason": "Reached identified service: Tronify (owner.type=other)",
+    "labels": ["Tronify", "Identified Service"],
+    "notes": "owner.type=other + non-null name triggers structural terminal per Signal priority rule 1.",
+    "service_label": "Tronify",
+    "protocol": null
+  }
+}

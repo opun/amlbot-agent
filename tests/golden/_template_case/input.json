@@ -1,0 +1,8 @@
+{
+  "description": "Example case: victim wallet traced to a CEX deposit.",
+  "victim_address": "0x0000000000000000000000000000000000000000",
+  "blockchain_name": "eth",
+  "asset_symbol": "USDT",
+  "approx_date": "2025-09-01",
+  "stolen_amount": 50000.0
+}

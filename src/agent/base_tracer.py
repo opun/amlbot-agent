@@ -24,11 +24,17 @@ from httpx import Limits, Timeout
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from .config import ModelConfig
+from .currency_registry import get_registry as _get_currency_registry
+from .llm_client import LLMResult, call_llm
+from .model_registry import resolve_model
 from .models import (
     CaseMeta,
+    DecisionRef,
     TracerConfig,
     TraceResult,
 )
+from .prompt_loader import PromptSpec, load_prompt
+from .recorder import MissingReplayEvent, TraceRecorder, stable_hash
 from .theft_detection import (
     extract_victim_from_tx_hash,
     infer_approx_date_from_description,
@@ -408,7 +414,7 @@ class BaseTracer(ABC):
     Contains shared orchestration logic - subclasses implement tool execution.
     """
 
-    def __init__(self):
+    def __init__(self, *, recorder: "TraceRecorder | None" = None):
         import httpx
         http_client = httpx.AsyncClient(
             timeout=Timeout(OPENAI_TIMEOUT, connect=OPENAI_CONNECT_TIMEOUT),
@@ -422,7 +428,6 @@ class BaseTracer(ABC):
         self.model_validator = ModelConfig.VALIDATOR_MODEL
         self.model_json_retry = ModelConfig.JSON_RETRY_MODEL
 
-        self.prompt_path = Path(__file__).parent / "prompts" / "trace_orchestrator.md"
         self.validator_prompt_path = Path(__file__).parent / "prompts" / "trace_validator.md"
         self.selector_prompt_path = Path(__file__).parent / "prompts" / "trace_hop_selector.md"
         self.hop_classifier_prompt_path = Path(__file__).parent / "prompts" / "trace_hop_classifier.md"
@@ -431,6 +436,9 @@ class BaseTracer(ABC):
         self.last_txs: list[dict[str, Any]] = []
         self.last_tx_list: list[dict[str, Any]] = []
         self.last_address_info: dict[str, dict[str, Any]] = {}
+
+        # Recorder: optional record/replay of every LLM + tool call.
+        self.recorder: "TraceRecorder | None" = recorder
 
     # ─── Abstract methods (implemented by subclasses) ─────────────────────────
 
@@ -441,25 +449,42 @@ class BaseTracer(ABC):
 
     # ─── Prompt loading ───────────────────────────────────────────────────────
 
-    def _load_prompt(self) -> str:
-        if not self.prompt_path.exists():
-            raise FileNotFoundError(f"Prompt not found: {self.prompt_path}")
-        return self.prompt_path.read_text(encoding="utf-8")
+    def _load_prompt_spec(self, path: Path, default_name: str) -> "PromptSpec":
+        """Load a prompt and cache the parsed ``PromptSpec`` on the instance.
 
+        Caching avoids re-reading + re-parsing the file on every hop
+        (each trace calls the classifier/selector dozens of times).
+        """
+        cache = self.__dict__.setdefault("_prompt_cache", {})
+        cached = cache.get(path)
+        if cached is not None:
+            return cached
+        if not path.exists():
+            raise FileNotFoundError(f"Prompt not found: {path}")
+        spec = load_prompt(path, name_default=default_name)
+        cache[path] = spec
+        return spec
+
+    def _validator_spec(self) -> "PromptSpec":
+        return self._load_prompt_spec(self.validator_prompt_path, "validator")
+
+    def _selector_spec(self) -> "PromptSpec":
+        return self._load_prompt_spec(self.selector_prompt_path, "hop_selector")
+
+    def _hop_classifier_spec(self) -> "PromptSpec":
+        return self._load_prompt_spec(self.hop_classifier_prompt_path, "hop_classifier")
+
+    # Back-compat body-only helpers (used by eval harness, log lines,
+    # and any downstream code that still expects a string). Don't add
+    # new callers — use ``_<x>_spec()`` instead.
     def _load_validator_prompt(self) -> str:
-        if not self.validator_prompt_path.exists():
-            raise FileNotFoundError(f"Validator prompt not found: {self.validator_prompt_path}")
-        return self.validator_prompt_path.read_text(encoding="utf-8")
+        return self._validator_spec().body
 
     def _load_selector_prompt(self) -> str:
-        if not self.selector_prompt_path.exists():
-            raise FileNotFoundError(f"Selector prompt not found: {self.selector_prompt_path}")
-        return self.selector_prompt_path.read_text(encoding="utf-8")
+        return self._selector_spec().body
 
     def _load_hop_classifier_prompt(self) -> str:
-        if not self.hop_classifier_prompt_path.exists():
-            raise FileNotFoundError(f"Hop classifier prompt not found: {self.hop_classifier_prompt_path}")
-        return self.hop_classifier_prompt_path.read_text(encoding="utf-8")
+        return self._hop_classifier_spec().body
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -482,38 +507,6 @@ class BaseTracer(ABC):
         if len(tx_hash) > 18:
             return f"{tx_hash[:10]}...{tx_hash[-6:]}"
         return tx_hash
-
-    def _coerce_message_dict(self, msg: Any) -> dict[str, Any]:
-        if isinstance(msg, dict):
-            return msg
-        if hasattr(msg, "model_dump"):
-            try:
-                dumped = msg.model_dump()
-                if isinstance(dumped, dict):
-                    return dumped
-            except (TypeError, ValueError) as e:
-                logger.debug("model_dump failed for message: %s", e)
-        role = getattr(msg, "role", None) or "assistant"
-        content = getattr(msg, "content", None)
-        if content is None:
-            content = str(msg)
-        return {"role": role, "content": content}
-
-    def _serialize_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
-        return [self._coerce_message_dict(m) for m in messages]
-
-    def _normalize_usage(self, usage_obj: Any) -> dict[str, Any] | None:
-        input_tokens = 0
-        output_tokens = 0
-        if usage_obj is not None:
-            usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj
-            if isinstance(usage, dict):
-                input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
-                output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or 0
-        return {
-            "input_tokens": int(input_tokens or 0),
-            "output_tokens": int(output_tokens or 0),
-        }
 
     def _flatten_strings(self, value: Any, limit: int = 200) -> list[str]:
         items: list[str] = []
@@ -683,27 +676,70 @@ class BaseTracer(ABC):
             return False
         return True
 
+    _EVM_NATIVE_CHAINS = frozenset({"eth", "bnb", "bsc", "matic", "arb", "op", "avax", "base"})
+
     def _normalize_amount(self, amount: Any, chain: str, asset: str | None = None) -> float:
+        """Convert a base-unit amount to display units, using currencies.json
+        when available and falling back to hand-written rules for anything
+        the registry doesn't know about.
+
+        Safeguard: we only scale when ``val`` is large enough to plausibly
+        be a base-unit value (``>= 10 ** (unit // 2)``). This prevents a
+        second scaling pass on amounts that are already in display form
+        (e.g. ``amount_coerced`` from ``all_txs`` comes through as 0.14 ETH
+        and must NOT be divided again).
+        """
         try:
             val = float(amount)
         except (TypeError, ValueError):
             return 0.0
-        asset_upper = asset.upper() if isinstance(asset, str) else None
+        if val == 0.0:
+            return 0.0
+
+        chain_norm = (chain or "").strip().lower() or None
+        asset_upper = asset.upper().strip() if isinstance(asset, str) and asset.strip() else None
+
+        # 1. Registry-driven path: authoritative decimals from
+        #    currencies.json. When asset is provided we resolve by
+        #    (chain, symbol); otherwise we fall back to the chain's
+        #    native token.
+        if chain_norm:
+            registry = _get_currency_registry()
+            record = None
+            if asset_upper:
+                record = registry.lookup_by_symbol(chain_norm, asset_upper)
+            if record is None:
+                record = registry.lookup(chain_norm, 0)
+            if record is not None and record.unit > 0:
+                scale = 10 ** record.unit
+                # Display-vs-base heuristic. The old hardcoded path used a
+                # flat ``1e6`` cutoff for all assets (USDT/TRX/BTC native
+                # all "divide when >= 1e6"). Registry migration shortened
+                # the safeguard to ``10^(unit/2)`` which broke USDT
+                # (unit=6): a display 60000-USDT value tripped the 10^3
+                # threshold and got divided a second time to 0.06. We
+                # restore the 1e6 floor for small-unit tokens while still
+                # using ``10^(unit/2)`` for high-unit ones (unit=18 →
+                # 10^9, matching the old EVM rule for gwei→ETH).
+                safeguard = 10 ** max(record.unit // 2, 6)
+                if val >= safeguard:
+                    return val / scale
+                return val
+
+        # 2. Legacy hardcoded rules — kept as fallback for chains/tokens
+        #    not yet in the registry (or in case it can't be loaded).
         six_dec_assets = {"USDT", "USDC", "TUSD", "USDP", "USDD", "BUSD"}
         if asset_upper in six_dec_assets and val >= 1e6:
             return val / 1e6
-        if chain == "trx" and val >= 1e6:
-            # TRX/TRC20 amounts are typically in base units (1e6).
-            # If we get a value that still looks over-scaled, downscale further.
+        if chain_norm == "trx" and val >= 1e6:
             scaled = val / 1e6
             if scaled >= 1e9:
                 return scaled / 1e6
             return scaled
-        # BTC/BCH/LTC: get_transaction returns satoshis (1e8 per coin).
-        # all_txs returns amount_coerced already in user units, so only
-        # convert when the value looks like satoshis (>= 1e6).
-        if chain in self._SATOSHI_CHAINS and val >= 1e6:
+        if chain_norm in self._SATOSHI_CHAINS and val >= 1e6:
             return val / 1e8
+        if chain_norm in self._EVM_NATIVE_CHAINS and val >= 1e6:
+            return val / 1e9
         return val
 
     def _resolve_amount(
@@ -746,7 +782,139 @@ class BaseTracer(ABC):
 
         return " ".join(parts).lower()
 
+    # Bridge brands seen under ``owner.type="other"``. The API labels many
+    # cross-chain services this way without a proper ``bridge`` type, so
+    # we match by name to still classify them as bridges — otherwise the
+    # tracer stops at the bridge contract instead of continuing on the
+    # destination chain via ``bridge_analyze``.
+    _BRIDGE_BRAND_NAMES: frozenset[str] = frozenset({
+        "allbridge", "bridgers", "bridgers.xyz", "layerzero", "stargate",
+        "wormhole", "synapse", "hop", "multichain", "across", "router",
+        "symbiosis", "mayan", "cbridge", "celer", "debridge", "squid",
+        "connext", "orbiter", "thorchain", "rango", "rubic",
+    })
+
+    @classmethod
+    def _classify_by_owner_type(cls, owner: Any) -> dict[str, Any] | None:
+        """Structural classification from ``get_address.data.owner.type``.
+
+        The AML API returns a typed ``owner`` block for every identified
+        service: ``{name, slug, type, subtype}``. The ``type`` field is
+        the primary structural signal (``exchange_unlicensed``,
+        ``p2p_exchange_unlicensed``, ``bridge``, ``mixer``, ``other``, …),
+        but the API is inconsistent for bridges and DEXes: brands like
+        Bridgers arrive as ``type="other", subtype="Bridge"``, and
+        SunSwap as ``type="p2p_exchange_unlicensed", subtype="DEX"``. So
+        we inspect ``subtype`` (and, for ``type="other"``, a curated
+        bridge-brand allowlist) before falling through to the generic
+        "identified service" bucket.
+
+        Returns ``None`` when the owner block is empty/nameless or the
+        type is unrecognized — the caller then falls back to keyword
+        heuristics.
+        """
+        if not isinstance(owner, dict):
+            return None
+        name = owner.get("name")
+        slug = owner.get("slug")
+        if (not name or not str(name).strip()) and (not slug or not str(slug).strip()):
+            # No identity → nothing to anchor on, even if ``type`` is set.
+            return None
+        identity = str(name or slug)
+        if identity.lower() in {"unknown", "null", ""}:
+            return None
+
+        owner_type = (owner.get("type") or "").strip().lower()
+        subtype = (owner.get("subtype") or "").strip().lower()
+
+        if owner_type.startswith("exchange"):
+            # exchange, exchange_licensed, exchange_unlicensed
+            return {
+                "role": "cex_deposit", "terminal": True,
+                "service_label": identity, "protocol": None,
+            }
+        if owner_type.startswith("p2p_exchange"):
+            # DEX subtype is explicit in the API (e.g. SunSwap → subtype=DEX).
+            if subtype == "dex":
+                return {
+                    "role": "dex_service", "terminal": True,
+                    "service_label": identity, "protocol": None,
+                }
+            # Other p2p variants = OTC-ish. Product intent is to stop here
+            # — Vasco asked for "don't step through identified services".
+            return {
+                "role": "otc_service", "terminal": True,
+                "service_label": identity, "protocol": None,
+            }
+        if owner_type.startswith("bridge"):
+            return {
+                "role": "bridge_service", "terminal": True,
+                "service_label": identity, "protocol": None,
+            }
+        if owner_type == "mixer":
+            return {
+                "role": "unidentified_service", "terminal": True,
+                "service_label": "Mixer", "protocol": None,
+            }
+        if owner_type == "stolen_coins":
+            # Community-reported victim address (e.g. "Victim report #16547").
+            # The tag means the funds are known-stolen — NOT that this is a
+            # destination we stop at. Our own trace's victim is a separate
+            # concept (anchored at case_meta.victim_address). Flag it so the
+            # UI shows "Stolen funds" but keep tracing outflows.
+            return {
+                "role": "intermediate", "terminal": False,
+                "service_label": "Stolen funds", "protocol": None,
+            }
+        if owner_type == "other":
+            # Subtype from the API is the most specific signal we have
+            # when ``type`` is the catch-all "other". A Bridgers-style
+            # bridge comes in as {type: other, subtype: Bridge}.
+            if subtype == "bridge":
+                return {
+                    "role": "bridge_service", "terminal": True,
+                    "service_label": identity, "protocol": identity.lower(),
+                }
+            if subtype == "dex":
+                return {
+                    "role": "dex_service", "terminal": True,
+                    "service_label": identity, "protocol": identity.lower(),
+                }
+            # Brand-name fallback: map well-known cross-chain bridges by
+            # name even when the API returns a bare ``type="other"``
+            # without a subtype. Keeping this list narrow — it only
+            # triggers for owner-confirmed identities.
+            ident_lower = identity.lower()
+            slug_lower = str(slug or "").lower()
+            for brand in cls._BRIDGE_BRAND_NAMES:
+                if brand in ident_lower or brand in slug_lower:
+                    return {
+                        "role": "bridge_service", "terminal": True,
+                        "service_label": identity, "protocol": brand,
+                    }
+            # Miner / mining pool — terminal, we don't chase block
+            # rewards down the miner payout tree.
+            if subtype in {"miner", "mining_pool", "pool"}:
+                return {
+                    "role": "unidentified_service", "terminal": True,
+                    "service_label": identity, "protocol": None,
+                }
+            # Known identity without a tighter category (e.g. Tronify).
+            # We stop rather than chase — but use a generic label so the
+            # UI still shows the brand name.
+            return {
+                "role": "unidentified_service", "terminal": True,
+                "service_label": identity, "protocol": None,
+            }
+        return None
+
     def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> dict[str, Any]:
+        # Structural signal first: owner.type matches a known service
+        # family with a non-null name/slug.
+        typed = self._classify_by_owner_type(owner)
+        if typed:
+            return typed
+
         # Strong signal: owner field from get_address or owner_hint from
         # token_transfers -- these identify who OWNS the address.
         owner_text = self._extract_identity_texts(owner, None, owner_hint)
@@ -933,9 +1101,6 @@ class BaseTracer(ABC):
 
         return normalized
 
-    def _max_tokens_arg(self, model: str, max_tokens: int) -> dict[str, int]:
-        return {}
-
     def _summarize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return {"entities": 0, "paths": 0, "txs": 0}
@@ -1062,425 +1227,122 @@ class BaseTracer(ABC):
 
     # ─── Selector ─────────────────────────────────────────────────────────────
 
-    async def _run_selector(self, context: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            messages = [
-                {"role": "system", "content": self._load_selector_prompt()},
-                {"role": "user", "content": json.dumps(context, indent=2)}
-            ]
-            summary = self._summarize_payload(context)
-            logger.info(f"[PROMPT=trace_selector] txs={summary['txs']}")
-            with generation_span(
-                input=self._serialize_messages(messages),
-                model=self.model_selector,
-                model_config={"purpose": "selector"},
-            ) as gen_span:
-                response = await self.openai_client.chat.completions.create(
-                    model=self.model_selector,
-                    messages=messages,
-                    # temperature=0,
-                    **self._max_tokens_arg(self.model_selector, 300)
-                )
-                try:
-                    if hasattr(gen_span, "span_data"):
-                        msg_dump = response.choices[0].message.model_dump()
-                        gen_span.span_data.output = [msg_dump]
-                        gen_span.span_data.usage = self._normalize_usage(response.usage)
-                except Exception:
-                    pass
-            output = response.choices[0].message.content or ""
-            return json.loads(self._strip_code_fences(output))
-        except Exception as exc:
-            logger.warning(f"Selector failed: {exc}")
-            return None
+    @staticmethod
+    def _llm_result_to_decision_ref(result: LLMResult, output_summary: dict) -> "DecisionRef":
+        return DecisionRef(
+            prompt_name=result.prompt_name,
+            prompt_version=result.prompt_version,
+            model=result.model,
+            family=result.family,
+            reasoning_effort=result.reasoning_effort,
+            input_hash=result.input_hash,
+            output_summary=output_summary,
+            usage=result.usage,
+            latency_ms=result.latency_ms,
+            decision_id=result.decision_id,
+            from_replay=result.from_replay,
+        )
 
-    async def _run_hop_classifier(self, context: dict[str, Any]) -> dict[str, Any] | None:
+    async def _run_selector(
+        self, context: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, "DecisionRef | None"]:
+        summary = self._summarize_payload(context)
+        logger.info("[PROMPT=trace_hop_selector] txs=%d", summary["txs"])
+        spec = self._selector_spec()
         try:
-            messages = [
-                {"role": "system", "content": self._load_hop_classifier_prompt()},
-                {"role": "user", "content": json.dumps(context, indent=2)}
-            ]
-            logger.info("[PROMPT=hop_classifier] address=%s", context.get("address"))
-            with generation_span(
-                input=self._serialize_messages(messages),
-                model=self.model_selector,
-                model_config={"purpose": "hop_classifier"},
-            ) as gen_span:
-                response = await self.openai_client.chat.completions.create(
-                    model=self.model_selector,
-                    messages=messages,
-                    # temperature=0,
-                    **self._max_tokens_arg(self.model_selector, 250)
-                )
-                try:
-                    if hasattr(gen_span, "span_data"):
-                        msg_dump = response.choices[0].message.model_dump()
-                        gen_span.span_data.output = [msg_dump]
-                        gen_span.span_data.usage = self._normalize_usage(response.usage)
-                except Exception:
-                    pass
-            output = response.choices[0].message.content or ""
-            return json.loads(self._strip_code_fences(output))
+            result = await call_llm(
+                openai_client=self.openai_client,
+                model_spec=resolve_model(
+                    spec.model_default or self.model_selector,
+                    reasoning_effort=spec.reasoning_effort if resolve_model(spec.model_default or self.model_selector).is_reasoning and spec.reasoning_effort else None,
+                ),
+                prompt_name=spec.name,
+                prompt_version=spec.version,
+                system=spec.body,
+                user=context,
+                recorder=self.recorder,
+                response_format="json",
+                max_output_tokens=spec.max_output_tokens,
+            )
+            parsed = result.parsed or {}
+            selected = parsed.get("selected_hashes") if isinstance(parsed, dict) else None
+            output_summary = {
+                "selected_count": len(selected) if isinstance(selected, list) else 0,
+                # Truncate hashes in the summary — full list stays in the
+                # recording; this is what lands in the TraceResult.
+                "selected_hashes_preview": [h[:12] + "..." for h in (selected or [])[:5]]
+                if isinstance(selected, list) else [],
+            }
+            return parsed, self._llm_result_to_decision_ref(result, output_summary)
         except Exception as exc:
-            logger.warning(f"Hop classifier failed: {exc}")
-            return None
+            logger.warning("Selector failed: %s", exc)
+            return None, None
+
+    async def _run_hop_classifier(
+        self, context: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, "DecisionRef | None"]:
+        logger.info("[PROMPT=hop_classifier] address=%s", context.get("address"))
+        spec = self._hop_classifier_spec()
+        try:
+            result = await call_llm(
+                openai_client=self.openai_client,
+                model_spec=resolve_model(
+                    spec.model_default or self.model_selector,
+                    reasoning_effort=spec.reasoning_effort if resolve_model(spec.model_default or self.model_selector).is_reasoning and spec.reasoning_effort else None,
+                ),
+                prompt_name=spec.name,
+                prompt_version=spec.version,
+                system=spec.body,
+                user=context,
+                recorder=self.recorder,
+                response_format="json",
+                max_output_tokens=spec.max_output_tokens,
+            )
+            parsed = result.parsed or {}
+            output_summary = {
+                "role": parsed.get("role") if isinstance(parsed, dict) else None,
+                "terminal": parsed.get("terminal") if isinstance(parsed, dict) else None,
+                "stop_reason": parsed.get("stop_reason") if isinstance(parsed, dict) else None,
+            }
+            return parsed, self._llm_result_to_decision_ref(result, output_summary)
+        except Exception as exc:
+            logger.warning("Hop classifier failed: %s", exc)
+            return None, None
 
     # ─── Validator ────────────────────────────────────────────────────────────
 
-    async def _run_validator(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _run_validator(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], "DecisionRef"]:
         summary = self._summarize_payload(payload)
         logger.info("[PROMPT=trace_validator] entities=%d paths=%d txs=%d",
                     summary["entities"], summary["paths"], summary["txs"])
-        messages = [
-            {"role": "system", "content": self._load_validator_prompt()},
-            {"role": "user", "content": json.dumps(payload, indent=2)}
-        ]
-        with generation_span(
-            input=self._serialize_messages(messages),
-            model=self.model_validator,
-            model_config={"purpose": "validator"},
-        ) as gen_span:
-            response = await asyncio.wait_for(
-                self.openai_client.chat.completions.create(
-                    model=self.model_validator, messages=messages
-                ),
-                timeout=60.0
-            )
-            try:
-                if hasattr(gen_span, "span_data"):
-                    msg_dump = response.choices[0].message.model_dump()
-                    gen_span.span_data.output = [msg_dump]
-                    gen_span.span_data.usage = self._normalize_usage(response.usage)
-            except Exception:
-                pass
-        output = response.choices[0].message.content or ""
-        return json.loads(self._strip_code_fences(output))
-
-    # ─── Orchestrator (main loop) ─────────────────────────────────────────────
-
-    async def _run_orchestrator(
-        self, prompt: str, payload: dict[str, Any],
-        on_progress: Callable[[str], Awaitable[None]] | None = None
-    ) -> dict[str, Any]:
-        """Run the LLM orchestrator with function calling and return parsed JSON."""
-        messages: list[Any] = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(payload, indent=2)}
-        ]
-        payload_summary = self._summarize_payload(payload)
-        logger.info("[PROMPT=trace_orchestrator] entities=%d paths=%d txs=%d",
-                    payload_summary["entities"], payload_summary["paths"], payload_summary["txs"])
-
-        logger.info("🚀 Starting trace orchestrator...")
-        trace_start = time.time()
-
-        max_turns = 100
-        consecutive_timeouts = 0
-        max_consecutive_timeouts = 3
-        addresses_traced: list[str] = []
-
-        allowed_token_hashes: set | None = None
-        txs_collected: list[dict[str, Any]] = []
-        tx_list_collected: list[dict[str, Any]] = []
-        all_txs_map: dict[str, dict[str, Any]] = {}
-        risk_map: dict[str, float] = {}
-        txs_seen: set = set()
-        empty_tool_call_turns = 0
-        _parallel_tool_calls = os.getenv("AGENT_PARALLEL_TOOL_CALLS", "").lower() in ("1", "true", "yes")
-        _tool_call_sem = asyncio.Semaphore(max(1, int(os.getenv("AGENT_MAX_CONCURRENT_TOOLS", "3"))))
-
-        try:
-            for turn in range(max_turns):
-                turn_start = time.time()
-                logger.info(f"⏳ Turn {turn + 1}: Waiting for LLM decision...")
-
-                try:
-                    messages = self._trim_messages(messages)
-                    msg_count = len(messages)
-                    tool_msg_count = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
-                    total_chars = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
-
-                    logger.info(
-                        "[PROMPT=trace_orchestrator:turn_%d] messages=%d tool_results=%d chars=%d entities=%d paths=%d txs=%d",
-                        turn + 1,
-                        msg_count,
-                        tool_msg_count,
-                        total_chars,
-                        payload_summary["entities"],
-                        payload_summary["paths"],
-                        payload_summary["txs"],
-                    )
-
-                    with generation_span(
-                        input=self._serialize_messages(messages),
-                        model=self.model_orchestrator,
-                        model_config={"tool_choice": "auto"},
-                    ) as gen_span:
-                        response = await asyncio.wait_for(
-                            self.openai_client.chat.completions.create(
-                                model=self.model_orchestrator,
-                                messages=messages,
-                                tools=TOOLS,
-                                tool_choice="auto",
-                                **self._max_tokens_arg(self.model_orchestrator, 1200)
-                            ),
-                            timeout=OPENAI_TIMEOUT + 10
-                        )
-                        try:
-                            if hasattr(gen_span, "span_data"):
-                                msg_dump = response.choices[0].message.model_dump()
-                                gen_span.span_data.output = [msg_dump]
-                                gen_span.span_data.usage = self._normalize_usage(response.usage)
-                        except Exception:
-                            pass
-                    consecutive_timeouts = 0
-
-                except (TimeoutError, APITimeoutError, APIConnectionError) as e:
-                    consecutive_timeouts += 1
-                    logger.warning(f"⚠️ Turn {turn + 1}: API error: {type(e).__name__}")
-                    if consecutive_timeouts >= max_consecutive_timeouts:
-                        raise RuntimeError(f"API timed out {max_consecutive_timeouts} times consecutively") from e
-                    await asyncio.sleep(2)
-                    continue
-
-                if on_progress:
-                    await on_progress(f"Analyzing hop {len(addresses_traced) + 1}...")
-
-                turn_elapsed = time.time() - turn_start
-                choice = response.choices[0]
-                message = choice.message
-                finish_reason = choice.finish_reason
-
-                logger.info(f"✅ Turn {turn + 1}: Response in {turn_elapsed:.1f}s (reason={finish_reason})")
-
-                tool_calls = self._extract_tool_calls(choice, message, finish_reason)
-                if finish_reason == "tool_calls" and not tool_calls:
-                    empty_tool_call_turns += 1
-                    logger.warning("finish_reason=tool_calls but no tool_calls. retrying=%d", empty_tool_call_turns)
-                    if empty_tool_call_turns >= 2:
-                        raise RuntimeError("LLM returned finish_reason=tool_calls without tool_calls payload.")
-                    await asyncio.sleep(1)
-                    continue
-
-                if tool_calls:
-                    empty_tool_call_turns = 0
-                    tool_names = [getattr(tc.function, "name", None) for tc in tool_calls if getattr(tc, "function", None)]
-                    tool_names = [name for name in tool_names if name]
-                    logger.info(f"🔧 LLM requesting {len(tool_names)} tool(s): {', '.join(tool_names)}")
-
-                    assistant_msg: dict[str, Any]
-                    if hasattr(message, "model_dump"):
-                        try:
-                            assistant_msg = message.model_dump()
-                        except Exception:
-                            assistant_msg = {"role": "assistant", "content": message.content or ""}
-                    else:
-                        assistant_msg = {"role": "assistant", "content": message.content or ""}
-
-                    if not isinstance(assistant_msg, dict):
-                        assistant_msg = {"role": "assistant", "content": message.content or ""}
-
-                    if not assistant_msg.get("tool_calls"):
-                        assistant_msg["tool_calls"] = [self._tool_call_to_dict(tc) for tc in tool_calls]
-
-                    messages.append(assistant_msg)
-
-                    # Cap tool calls per turn
-                    skipped_tool_calls = []
-                    if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
-                        skipped_tool_calls = tool_calls[MAX_TOOL_CALLS_PER_TURN:]
-                        tool_calls = tool_calls[:MAX_TOOL_CALLS_PER_TURN]
-                        logger.warning(f"⚠️ Tool cap reached. Skipping {len(skipped_tool_calls)} calls.")
-
-                    # Cap token_transfers per turn
-                    filtered_calls = []
-                    token_count = 0
-                    for tc in tool_calls:
-                        if tc.function.name == "token_transfers":
-                            if token_count < MAX_TOKEN_TRANSFERS_PER_TURN:
-                                filtered_calls.append(tc)
-                                token_count += 1
-                            else:
-                                skipped_tool_calls.append(tc)
-                        else:
-                            filtered_calls.append(tc)
-                    tool_calls = filtered_calls
-
-                    # Enforce selector hashes (never block the primary tx_hash)
-                    if allowed_token_hashes:
-                        filtered_calls = []
-                        primary_tx_hash = payload.get("inputs", {}).get("tx_hash")
-                        for tc in tool_calls:
-                            if tc.function.name == "token_transfers":
-                                try:
-                                    args = json.loads(tc.function.arguments)
-                                    tx_hash = args.get("tx_hash")
-                                    if tx_hash == primary_tx_hash or tx_hash in allowed_token_hashes:
-                                        filtered_calls.append(tc)
-                                    else:
-                                        skipped_tool_calls.append(tc)
-                                except Exception:
-                                    filtered_calls.append(tc)
-                            else:
-                                filtered_calls.append(tc)
-                        tool_calls = filtered_calls
-
-                    # Emit skipped tool call errors
-                    for skipped in skipped_tool_calls:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": skipped.id,
-                            "content": json.dumps({"error": "tool_call_skipped", "tool": skipped.function.name})
-                        })
-
-                    all_txs_results: list[dict[str, Any]] = []
-
-                    async def _execute_tool_call(tc):
-                        tool_name = tc.function.name
-                        raw_args = tc.function.arguments
-                        try:
-                            arguments = json.loads(raw_args) if raw_args else {}
-                        except Exception:
-                            logger.warning(f"Invalid tool arguments for {tool_name}. Using empty args.")
-                            arguments = {}
-
-                        tool_input = json.dumps(arguments, ensure_ascii=False)
-                        tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
-                        _to = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
-
-                        async def _run_tool_body() -> tuple[str, dict[str, Any], str]:
-                            with function_span(tool_name, input=tool_input) as tool_span:
-                                try:
-                                    result = await asyncio.wait_for(
-                                        self.execute_tool(tool_name, arguments),
-                                        timeout=_to
-                                    )
-                                    compact = self._compact_tool_result(tool_name, result)
-                                    tool_result = json.dumps(compact, ensure_ascii=False)
-                                    try:
-                                        if hasattr(tool_span, "span_data"):
-                                            tool_span.span_data.output = compact
-                                    except Exception:
-                                        pass
-                                except TimeoutError:
-                                    logger.error(f"❌ Tool timeout: {tool_name} (limit={_to}s)")
-                                    tool_result = json.dumps({"error": "tool_timeout", "tool": tool_name})
-                                    try:
-                                        tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
-                                        tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
-                                    except Exception:
-                                        pass
-                                except Exception as e:
-                                    logger.error(f"❌ Tool error: {e}")
-                                    tool_result = json.dumps({"error": str(e), "tool": tool_name})
-                                    try:
-                                        tool_span.set_error({"message": str(e), "data": {"tool": tool_name}})
-                                        tool_span.span_data.output = {"error": str(e), "tool": tool_name}
-                                    except Exception:
-                                        pass
-                                return tool_name, arguments, tool_result
-
-                        if _parallel_tool_calls:
-                            async with _tool_call_sem:
-                                tn, args, tres = await _run_tool_body()
-                        else:
-                            tn, args, tres = await _run_tool_body()
-                        return tc, tn, args, tres
-
-                    if _parallel_tool_calls and len(tool_calls) > 1:
-                        tool_outcomes = await asyncio.gather(*(_execute_tool_call(tc) for tc in tool_calls))
-                    else:
-                        tool_outcomes = [await _execute_tool_call(tc) for tc in tool_calls]
-
-                    for tool_call, tool_name, arguments, tool_result in tool_outcomes:
-                        if tool_name == "get_address" and "address" in arguments:
-                            addr = arguments["address"]
-                            if addr not in addresses_traced:
-                                addresses_traced.append(addr)
-                                logger.info(f"📍 Hop {len(addresses_traced)}: Analyzing {self._format_address(addr)}")
-
-                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_result})
-
-                        # Collect tx data for visualization
-                        if tool_name == "all_txs":
-                            try:
-                                parsed = json.loads(tool_result)
-                                all_txs_results.append(parsed)
-                                data_list = parsed.get("data", [])
-                                if isinstance(data_list, list):
-                                    for item in data_list:
-                                        tx_hash = item.get("hash")
-                                        if tx_hash:
-                                            all_txs_map[tx_hash] = item
-                            except Exception:
-                                pass
-                        elif tool_name == "get_address":
-                            try:
-                                parsed = json.loads(tool_result)
-                                data_obj = parsed.get("data", {}) if isinstance(parsed, dict) else {}
-                                riskscore = data_obj.get("riskscore") or data_obj.get("risk_score")
-                                if isinstance(riskscore, dict):
-                                    risk_val = riskscore.get("value", 0.0)
-                                else:
-                                    risk_val = riskscore or 0.0
-                                address = arguments.get("address")
-                                if address:
-                                    risk_map[address] = float(risk_val) if risk_val is not None else 0.0
-                            except Exception:
-                                pass
-                        elif tool_name == "token_transfers":
-                            self._collect_token_transfer_data(
-                                tool_result, arguments, all_txs_map, risk_map,
-                                txs_collected, tx_list_collected, txs_seen
-                            )
-
-                    # Run selector after all_txs
-                    if all_txs_results:
-                        selector_context = {
-                            "chain": payload.get("case_meta", {}).get("blockchain_name"),
-                            "asset": payload.get("case_meta", {}).get("asset_symbol"),
-                            "txs": all_txs_results[0].get("data") if isinstance(all_txs_results[0], dict) else []
-                        }
-                        selector_result = await self._run_selector(selector_context)
-                        if selector_result and isinstance(selector_result, dict):
-                            selected = selector_result.get("selected_hashes") or []
-                            if selected:
-                                allowed_token_hashes = set(selected)
-                            messages.append({"role": "assistant", "content": f"SELECTOR_RESULT: {json.dumps(selector_result)}"})
-
-                    if turn > 0 and turn % 5 == 0:
-                        total_elapsed = time.time() - trace_start
-                        logger.info(f"📊 Progress: {turn + 1} turns, {len(addresses_traced)} addresses, {total_elapsed:.0f}s")
-                else:
-                    # Final response
-                    total_elapsed = time.time() - trace_start
-                    raw_output = message.content or ""
-
-                    logger.info("🎉 Trace completed!")
-                    logger.info(f"   └─ Turns: {turn + 1}, Addresses: {len(addresses_traced)}, Time: {total_elapsed:.1f}s")
-                    if addresses_traced:
-                        logger.info(f"   └─ Path: {' → '.join(self._format_address(a) for a in addresses_traced)}")
-
-                    if not raw_output.strip() or finish_reason == "length":
-                        return await self._retry_json_response(messages, message)
-
-                    cleaned = self._strip_code_fences(raw_output)
-                    if not cleaned.strip().startswith("{"):
-                        raise ValueError(f"Response is not JSON: {cleaned[:100]}...")
-
-                    try:
-                        return json.loads(cleaned)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"JSON parse error: {e}")
-                        return await self._retry_json_response(messages, message)
-
-            raise RuntimeError(f"Orchestrator exceeded max turns ({max_turns})")
-        finally:
-            self.last_txs = txs_collected
-            self.last_tx_list = tx_list_collected
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("TXS_ARRAY=%s", json.dumps(self.last_txs, ensure_ascii=False))
-                logger.debug("TXLIST_ARRAY=%s", json.dumps(self.last_tx_list, ensure_ascii=False))
+        spec = self._validator_spec()
+        result = await call_llm(
+            openai_client=self.openai_client,
+            model_spec=resolve_model(
+                spec.model_default or self.model_validator,
+                reasoning_effort=spec.reasoning_effort if resolve_model(spec.model_default or self.model_validator).is_reasoning and spec.reasoning_effort else None,
+            ),
+            prompt_name=spec.name,
+            prompt_version=spec.version,
+            system=spec.body,
+            user=payload,
+            recorder=self.recorder,
+            response_format="json",
+            max_output_tokens=spec.max_output_tokens,
+            timeout=60.0,
+        )
+        if result.parsed is None:
+            # Validator is a hard dependency of postprocessing; raise on
+            # empty/unparseable output rather than returning {} and letting
+            # downstream code produce a garbage TraceResult.
+            raise ValueError("validator returned non-JSON content")
+        output_summary = {
+            "paths": len(result.parsed.get("paths", [])) if isinstance(result.parsed, dict) else 0,
+            "entities": len(result.parsed.get("entities", [])) if isinstance(result.parsed, dict) else 0,
+        }
+        return result.parsed, self._llm_result_to_decision_ref(result, output_summary)
 
     async def _run_agentic_trace(
         self, payload: dict[str, Any],
@@ -1516,6 +1378,15 @@ class BaseTracer(ABC):
         stolen_amount = float(inputs.get("stolen_amount") or payload.get("stolen_amount") or 0.0)
         traced_tolerance = float(inputs.get("traced_amount_tolerance") or payload.get("traced_amount_tolerance") or 0.03)
         fifo_ledger = FIFOLedger(stolen_amount, traced_tolerance)
+        # Dust threshold — skip pushing a HopJob when the FIFO-attributed
+        # theft share of a new step falls below this fraction of the
+        # original stolen_amount. Set to 0 to disable (legacy behavior).
+        min_attribution_ratio = float(
+            inputs.get("min_path_attribution_ratio")
+            or payload.get("min_path_attribution_ratio")
+            or 0.01
+        )
+        dust_trimmed_paths: set[str] = set()
 
         async def _call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
             if "blockchain_name" in arguments:
@@ -1528,6 +1399,26 @@ class BaseTracer(ABC):
             tool_input = tool_input[:2000] if len(tool_input) > 2000 else tool_input
             timeout = TOOL_TIMEOUT_SLOW if tool_name in _SLOW_TOOLS else TOOL_TIMEOUT
             with function_span(tool_name, input=tool_input) as tool_span:
+                # Replay short-circuit: when the recorder is in replay mode,
+                # return the recorded result instead of hitting the backend.
+                # Missing events fall through to a live call (useful when
+                # running a partial replay against a new code path).
+                if self.recorder is not None and self.recorder.is_replay:
+                    try:
+                        replayed = self.recorder.replay_tool_call(tool_name, arguments)
+                        try:
+                            if hasattr(tool_span, "span_data"):
+                                tool_span.span_data.output = self._compact_tool_result(tool_name, replayed)
+                        except Exception:
+                            pass
+                        return replayed
+                    except MissingReplayEvent as miss:
+                        logger.warning(
+                            "replay miss for tool %s: %s — falling back to live call",
+                            tool_name, miss,
+                        )
+
+                started_at = time.perf_counter()
                 try:
                     result = await asyncio.wait_for(
                         self.execute_tool(tool_name, arguments),
@@ -1538,6 +1429,11 @@ class BaseTracer(ABC):
                             tool_span.span_data.output = self._compact_tool_result(tool_name, result)
                     except Exception:
                         pass
+                    if self.recorder is not None and self.recorder.is_recording:
+                        self.recorder.record_tool_call(
+                            tool_name, arguments, result,
+                            duration_ms=int((time.perf_counter() - started_at) * 1000),
+                        )
                     return result
                 except TimeoutError:
                     logger.error(f"❌ Tool timeout: {tool_name} (limit={timeout}s)")
@@ -1546,6 +1442,12 @@ class BaseTracer(ABC):
                         tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
                     except Exception:
                         pass
+                    if self.recorder is not None and self.recorder.is_recording:
+                        self.recorder.record_tool_call(
+                            tool_name, arguments, None,
+                            duration_ms=int((time.perf_counter() - started_at) * 1000),
+                            error="tool_timeout",
+                        )
                     return {"error": "tool_timeout", "tool": tool_name}
                 except Exception as e:
                     logger.error(f"❌ Tool error: {e}")
@@ -1554,6 +1456,12 @@ class BaseTracer(ABC):
                         tool_span.span_data.output = {"error": str(e), "tool": tool_name}
                     except Exception:
                         pass
+                    if self.recorder is not None and self.recorder.is_recording:
+                        self.recorder.record_tool_call(
+                            tool_name, arguments, None,
+                            duration_ms=int((time.perf_counter() - started_at) * 1000),
+                            error=str(e),
+                        )
                     return {"error": str(e), "tool": tool_name}
 
         def _ensure_entity(address: str, role: str, risk_score: float = 0.0, labels: list[str] | None = None, notes: str | None = None):
@@ -2135,10 +2043,83 @@ class BaseTracer(ABC):
                 dst_chain = _find_key(data, {"dst_chain", "dest_chain", "destination_chain", "dstChain", "destinationChain"})
                 dst_addr = _find_key(data, {"destination_address", "dst_address", "dstAddress", "destinationAddress", "address"})
 
-            amount_out = _find_key(data, {"amount_out", "output_amount", "amount", "outputAmount"})
+            # Destination-chain fallback chain: some protocols (thorchain,
+            # Chainflip) leave ``dst_chain`` null at the top level and put
+            # the real chain into a nested field or encode it in the token
+            # identifier. Consult those before giving up.
+            if not dst_chain:
+                from .currency_registry import normalize_external_chain, parse_thorchain_token_prefix
+                recipient_ft = _find_key(data, {
+                    "recipient_external_ft", "recipient_chain",
+                    "to_chain", "destination_chain_name",
+                })
+                if recipient_ft:
+                    mapped = normalize_external_chain(recipient_ft)
+                    if mapped:
+                        dst_chain = mapped
+                if not dst_chain:
+                    to_token = _find_key(data, {"to_token", "dst_token"})
+                    mapped = parse_thorchain_token_prefix(to_token)
+                    if mapped:
+                        dst_chain = mapped
+
+            # Separate destination-side amount from source-side amount.
+            # Source-only fields (``from_amount``, generic ``amount``) are
+            # denominated in the *source* asset and must NOT be used when
+            # the bridge swaps assets (Bridgers: ``from_amount`` in ETH
+            # wei, no ``to_amount`` at all → would be normalized as USDT).
+            to_amount = _find_key(data, {
+                "to_amount", "dst_amount", "received_amount",
+                "amount_out", "output_amount", "outputAmount",
+            })
+            from_amount = _find_key(data, {
+                "from_amount", "src_amount", "source_amount",
+                "input_amount", "amount_in",
+            })
+            if from_amount is None:
+                # Generic ``amount`` is source-side in thorchain/Bridgers.
+                from_amount = _find_key(data, {"amount"})
+            # Legacy field consumed by downstream code: prefer destination
+            # amount when available; fall back to source only when same-asset.
+            amount_out = to_amount if to_amount is not None else from_amount
             dst_tx_hash = _find_key(data, {"dst_tx_hash", "destination_tx_hash", "dstTxHash"})
             dst_block_time = _find_key(data, {"dst_block_time", "destination_block_time", "dstBlockTime"})
             protocol = _find_key(data, {"protocol", "bridge", "service", "bridge_name"})
+            # Source-side timestamp, used to time-match the destination leg
+            # when the API doesn't provide ``to_amount`` or ``dst_tx_hash``
+            # (Bridgers shape). Accept both Unix seconds and ISO-8601.
+            src_ts_raw = _find_key(data, {
+                "timestamp_iso", "timestamp", "block_time", "time",
+            })
+            src_ts: int | None = None
+            if isinstance(src_ts_raw, (int, float)):
+                src_ts = int(src_ts_raw)
+            elif isinstance(src_ts_raw, str):
+                txt = src_ts_raw.strip()
+                if txt.isdigit():
+                    src_ts = int(txt)
+                else:
+                    try:
+                        from datetime import datetime, timezone
+                        # ``fromisoformat`` on 3.11+ handles the trailing ``Z``.
+                        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        src_ts = int(dt.timestamp())
+                    except (ValueError, TypeError):
+                        src_ts = None
+
+            # Destination asset (when the bridge also swaps). Registry
+            # owns the decimals, so we deliberately ignore any
+            # ``to_token_decimals`` the API offers — it's been observed
+            # to be wrong (thorchain returns 18 for BTC).
+            dst_asset_raw = _find_key(data, {
+                "to_token_symbol", "dst_asset", "dst_symbol",
+                "destination_asset", "destination_symbol",
+            })
+            dst_asset: str | None = None
+            if isinstance(dst_asset_raw, str) and dst_asset_raw.strip():
+                dst_asset = dst_asset_raw.strip().upper()
 
             if not is_bridge and (dst_chain or dst_addr):
                 is_bridge = True
@@ -2147,10 +2128,14 @@ class BaseTracer(ABC):
                 "is_bridge": bool(is_bridge),
                 "dst_chain": dst_chain,
                 "dst_address": dst_addr,
+                "dst_asset": dst_asset,
                 "amount_out": amount_out,
+                "to_amount": to_amount,
+                "from_amount": from_amount,
                 "dst_tx_hash": dst_tx_hash,
                 "dst_block_time": dst_block_time,
                 "protocol": protocol,
+                "src_ts": src_ts,
             }
 
         async def _resolve_token_id_for_chain(
@@ -2161,6 +2146,18 @@ class BaseTracer(ABC):
         ) -> int | None:
             if not asset_symbol or not address:
                 return fallback
+            # Registry-first: the currency DB already knows the canonical
+            # token_id for popular (chain, symbol) pairs (e.g. USDT/TRX =
+            # 9) and avoids a network round-trip plus side effects on the
+            # replay-recorder's FIFO queue. Fall back to ``token_stats``
+            # when the registry doesn't know about the pair.
+            try:
+                from .currency_registry import get_registry
+                rec = get_registry().lookup_by_symbol(chain_name, asset_symbol)
+                if rec is not None and rec.token_id is not None:
+                    return int(rec.token_id)
+            except Exception:
+                pass
             try:
                 stats = await _call_tool("token_stats", {
                     "blockchain_name": chain_name,
@@ -2173,6 +2170,23 @@ class BaseTracer(ABC):
                         token_id = item.get("token_id") or item.get("tokenId")
                         if token_id is not None:
                             return int(token_id)
+                # ``token_stats`` rows don't always carry a ``symbol``;
+                # cross-check via the currency registry using each
+                # reported token_id.
+                try:
+                    from .currency_registry import get_registry
+                    reg = get_registry()
+                    for item in data_list:
+                        tid = item.get("token_id") or item.get("tokenId")
+                        if tid is None:
+                            continue
+                        rec = reg.lookup(chain_name, int(tid))
+                        if rec is None:
+                            continue
+                        if (rec.symbol or "").upper() == asset_symbol.upper():
+                            return int(tid)
+                except Exception:
+                    pass
             except Exception:
                 return fallback
             return fallback
@@ -2372,6 +2386,7 @@ class BaseTracer(ABC):
             )
             selected_hashes = self._accumulate_hashes(data_list, None, chain, asset=asset)
             used_accumulation = bool(selected_hashes)
+            seed_selector_decision: DecisionRef | None = None
             if not selected_hashes and data_list:
                 # Fallback to selector only if accumulation can't decide
                 selector_context = {
@@ -2381,7 +2396,7 @@ class BaseTracer(ABC):
                     "incoming_time": date_ts,
                     "txs": data_list,
                 }
-                selector_result = await self._run_selector(selector_context)
+                selector_result, seed_selector_decision = await self._run_selector(selector_context)
                 selected_hashes = (selector_result or {}).get("selected_hashes") or []
                 used_accumulation = False
             if not selected_hashes and data_list:
@@ -2448,6 +2463,9 @@ class BaseTracer(ABC):
                     "service_label": None,
                     "protocol": None,
                     "reasoning": "Selected as primary theft candidate from victim outflows.",
+                    "llm_decisions": (
+                        [seed_selector_decision.model_dump()] if seed_selector_decision else []
+                    ),
                 })
 
                 self._collect_token_transfer_data(
@@ -2545,7 +2563,8 @@ class BaseTracer(ABC):
                 "get_extra_address_info": get_extra_result,
                 "owner_hint": owner_hint,
             }
-            classification = await self._run_hop_classifier(classifier_context) or {}
+            classification_raw, classifier_decision = await self._run_hop_classifier(classifier_context)
+            classification = classification_raw or {}
             role = classification.get("role") or "intermediate"
             terminal = bool(classification.get("terminal"))
             stop_reason = classification.get("stop_reason")
@@ -2632,7 +2651,8 @@ class BaseTracer(ABC):
                 dst_address = bridge_info.get("dst_address")
                 dst_tx_hash = bridge_info.get("dst_tx_hash")
                 dst_block_time = bridge_info.get("dst_block_time")
-                amount_out = bridge_info.get("amount_out")
+                to_amount_api = bridge_info.get("to_amount")
+                from_amount_api = bridge_info.get("from_amount")
 
                 if dst_chain and dst_address:
                     # Promote to bridge service if tool confirms with destination
@@ -2643,13 +2663,120 @@ class BaseTracer(ABC):
                     _ensure_entity(job.current_address, role, risk_score, labels=labels, notes=notes)
 
                     dst_chain_norm = self._normalize_chain(dst_chain)
-                    bridge_amount = self._normalize_amount(
-                        amount_out if amount_out is not None else (job.incoming_amount or 0.0),
-                        dst_chain_norm,
-                        job.asset,
-                    )
-                    if amount_out is not None and job.incoming_amount:
-                        gap = abs(self._normalize_amount(amount_out, dst_chain_norm, job.asset) - float(job.incoming_amount or 0.0)) / max(float(job.incoming_amount or 1.0), 1.0)
+                    # Destination asset (for cross-asset bridges like
+                    # thorchain swap-bridges). When the API gives us
+                    # ``dst_asset``, we switch on it; otherwise the
+                    # trace continues on the same asset as before.
+                    dst_asset_api = bridge_info.get("dst_asset")
+                    new_asset = (dst_asset_api or job.asset or "").upper() or job.asset
+                    asset_changed = bool(dst_asset_api) and new_asset != (job.asset or "").upper()
+
+                    # Pick the raw amount to carry across the bridge.
+                    # Cross-asset bridges: only ``to_amount`` is meaningful;
+                    # ``from_amount`` is in source-asset units and must not
+                    # be normalized against the destination decimals.
+                    matched_dst_tx_hash: str | None = None
+                    matched_dst_block_time: int | None = None
+                    dst_token_id_resolved: int | None = None
+                    if to_amount_api is not None:
+                        bridge_amount = self._normalize_amount(
+                            to_amount_api, dst_chain_norm, new_asset,
+                        )
+                    elif not asset_changed:
+                        raw = from_amount_api if from_amount_api is not None else (job.incoming_amount or 0.0)
+                        bridge_amount = self._normalize_amount(raw, dst_chain_norm, new_asset)
+                    else:
+                        # Asset swapped and no destination amount in the
+                        # bridge response (Bridgers shape). Time-match:
+                        # look up the first incoming ``new_asset`` tx to
+                        # ``dst_address`` on ``dst_chain`` within a short
+                        # window around the source-tx timestamp. That
+                        # recovers the real received amount (can't be
+                        # inferred from ``from_amount``, which is in
+                        # source units) and a real dst_tx_hash, avoiding
+                        # the "MOCK DATA" tooltip produced by a synthetic
+                        # ``tx-…`` hash.
+                        #
+                        # Window: [src_ts - 60, src_ts + 1800]. Bridge
+                        # legs typically settle in under 10 minutes;
+                        # 30 min gives headroom for congested chains
+                        # without letting unrelated later deposits win
+                        # on busy addresses. The 60 s underbound absorbs
+                        # clock skew between ETH and TRON block times.
+                        bridge_amount = 0.0
+                        BRIDGE_MATCH_WINDOW_SECS = 1800
+                        src_ts = bridge_info.get("src_ts") or dst_block_time or job.incoming_time
+                        if src_ts and dst_address:
+                            try:
+                                dst_token_id_hint = await _resolve_token_id_for_chain(
+                                    dst_chain_norm, dst_address, new_asset, fallback=None,
+                                )
+                                dst_token_id_resolved = dst_token_id_hint
+                                filter_obj: dict[str, Any] = {
+                                    "time": {
+                                        ">=": int(src_ts) - 60,
+                                        "<=": int(src_ts) + BRIDGE_MATCH_WINDOW_SECS,
+                                    },
+                                }
+                                if dst_token_id_hint:
+                                    filter_obj["token_id"] = [int(dst_token_id_hint)]
+                                incoming = await _call_tool("all_txs", {
+                                    "address": dst_address,
+                                    "blockchain_name": dst_chain_norm,
+                                    "filter": filter_obj,
+                                    "limit": 25, "offset": 0,
+                                    "direction": "asc", "order": "time",
+                                    "transaction_type": "deposit",
+                                })
+                                rows = incoming.get("data", []) if isinstance(incoming, dict) else []
+                                for row in rows:
+                                    if not isinstance(row, dict):
+                                        continue
+                                    # Asset / token match:
+                                    row_tid = row.get("token_id")
+                                    if dst_token_id_hint and row_tid is not None and int(row_tid) != int(dst_token_id_hint):
+                                        continue
+                                    row_asset = row.get("asset") or row.get("token_symbol")
+                                    row_symbol = (str(row_asset).upper() if row_asset else None)
+                                    if row_symbol and row_symbol != new_asset:
+                                        continue
+                                    # Skip zero-value rows (TRX fee rows
+                                    # and rejected txs); we want the
+                                    # real asset transfer.
+                                    raw_amt = (
+                                        row.get("amount_coerced")
+                                        or row.get("amount")
+                                        or 0
+                                    )
+                                    try:
+                                        if float(raw_amt) <= 0:
+                                            continue
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if (row.get("type") or "") == "rejected":
+                                        continue
+                                    bridge_amount = self._normalize_amount(
+                                        raw_amt, dst_chain_norm, new_asset,
+                                    )
+                                    bt = row.get("block_time") or row.get("pool_time")
+                                    matched_dst_tx_hash = row.get("hash") or row.get("tx_hash")
+                                    matched_dst_block_time = int(bt) if bt else None
+                                    break
+                            except Exception as exc:  # best-effort; leave bridge_amount=0
+                                logger.warning(
+                                    "Bridge time-match failed for %s on %s: %s",
+                                    self._format_address(dst_address), dst_chain_norm, exc,
+                                )
+                    if matched_dst_tx_hash is not None:
+                        dst_tx_hash = matched_dst_tx_hash
+                    if matched_dst_block_time is not None:
+                        dst_block_time = matched_dst_block_time
+                    if to_amount_api is not None and job.incoming_amount and not asset_changed:
+                        # Aggregation-detection only makes sense when
+                        # source and destination asset are the same; a
+                        # cross-asset bridge trivially "differs" and
+                        # would flood annotations.
+                        gap = abs(bridge_amount - float(job.incoming_amount or 0.0)) / max(float(job.incoming_amount or 1.0), 1.0)
                         if gap > 0.2:
                             annotations.append({
                                 "id": f"ann-{len(annotations)+1}",
@@ -2661,6 +2788,14 @@ class BaseTracer(ABC):
 
                     bridge_step_amount = float(bridge_amount or 0.0)
                     bridge_raw_attr = fifo_ledger.attribute_outflow(job.current_address, bridge_step_amount)
+                    # Cross-asset bridge: FIFO tracks source-asset units so
+                    # the returned attribution (e.g. 0.14 ETH) is not
+                    # comparable to the destination-denominated amount
+                    # (e.g. 590 USDT). Treat the time-matched destination
+                    # deposit as fully attributable — the bridge swap
+                    # mapped the whole source inflow into this outflow.
+                    if asset_changed and bridge_step_amount > 0:
+                        bridge_raw_attr = bridge_step_amount
                     fifo_ledger.record_inflow(dst_address, bridge_step_amount, bridge_raw_attr)
 
                     step_index = len(paths[job.path_id]["steps"])
@@ -2670,7 +2805,7 @@ class BaseTracer(ABC):
                         "to": dst_address,
                         "tx_hash": dst_tx_hash,
                         "chain": dst_chain_norm,
-                        "asset": job.asset,
+                        "asset": new_asset,
                         "amount_estimate": bridge_step_amount,
                         "attributed_amount": bridge_raw_attr,
                         "time": int(dst_block_time) if dst_block_time else job.incoming_time,
@@ -2678,15 +2813,84 @@ class BaseTracer(ABC):
                         "step_type": "bridge_transfer",
                         "service_label": classification.get("service_label") or heuristic.get("service_label") or "Bridge",
                         "protocol": bridge_info.get("protocol") or classification.get("protocol"),
-                        "reasoning": "Bridge detected; continuing on destination chain.",
+                        "reasoning": (
+                            f"Bridge {job.asset}→{new_asset} detected; continuing on {dst_chain_norm}."
+                            if asset_changed else "Bridge detected; continuing on destination chain."
+                        ),
+                        "llm_decisions": (
+                            [classifier_decision.model_dump()] if classifier_decision else []
+                        ),
                     })
+                    if asset_changed:
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": "Bridge Asset Swap",
+                            "related_addresses": [job.current_address, dst_address],
+                            "related_steps": [f"{job.path_id}:{step_index}"],
+                            "text": (
+                                f"Bridge swapped {job.asset} → {new_asset}; downstream "
+                                f"dust threshold is re-anchored on the destination amount."
+                            ),
+                        })
 
-                    new_token_id = await _resolve_token_id_for_chain(
-                        dst_chain_norm,
-                        dst_address,
-                        job.asset,
-                        fallback=job.token_id,
+                    if dst_token_id_resolved is not None:
+                        new_token_id = dst_token_id_resolved
+                    else:
+                        new_token_id = await _resolve_token_id_for_chain(
+                            dst_chain_norm,
+                            dst_address,
+                            new_asset,
+                            fallback=job.token_id if not asset_changed else 0,
+                        )
+
+                    # Dust guard. When the bridge also swapped the asset,
+                    # the source stolen_amount ("0.14 ETH") isn't
+                    # comparable to the destination amount ("2.89 BTC"),
+                    # so we re-anchor on the outgoing amount — anything
+                    # that makes it across should be worth tracing until
+                    # its own descendant shrinks below 1% of ITS inflow.
+                    dust_anchor = stolen_amount
+                    if asset_changed and bridge_step_amount > 0:
+                        dust_anchor = bridge_step_amount
+                    # Skip dust guard entirely when:
+                    #   1. The bridge response lacked a destination
+                    #      amount (Bridgers shape with no time-match
+                    #      hit): 0 vs anything would always trip.
+                    #   2. The bridge swapped the asset: bridge_raw_attr
+                    #      above was set to bridge_step_amount so the
+                    #      ratio is always 1.0 — but skip anyway so the
+                    #      intent is explicit; the destination-side
+                    #      HopJob will enforce its own dust rule once
+                    #      real downstream txs appear.
+                    have_dest_amount = to_amount_api is not None or bridge_step_amount > 0
+                    bridge_dust_hit = (
+                        have_dest_amount
+                        and not asset_changed
+                        and dust_anchor > 0
+                        and min_attribution_ratio > 0.0
+                        and bridge_raw_attr < dust_anchor * min_attribution_ratio
                     )
+                    if bridge_dust_hit:
+                        dust_pct = (bridge_raw_attr / dust_anchor) * 100.0 if dust_anchor else 0.0
+                        paths[job.path_id]["stop_reason"] = (
+                            f"Below dust threshold ({dust_pct:.2f}% of "
+                            f"{'destination' if asset_changed else 'stolen'} amount) (bridge)"
+                        )
+                        if job.path_id not in dust_trimmed_paths:
+                            annotations.append({
+                                "id": f"ann-{len(annotations)+1}",
+                                "label": "Dust Trimmed",
+                                "related_addresses": [dst_address],
+                                "related_steps": [f"{job.path_id}:{step_index}"],
+                                "text": (
+                                    f"Bridge leg trimmed at {self._format_address(dst_address)}: "
+                                    f"attributed {bridge_raw_attr:.2f} < "
+                                    f"{min_attribution_ratio*100:.2f}% of {dust_anchor:.2f} "
+                                    f"({'destination' if asset_changed else 'stolen'} anchor)"
+                                ),
+                            })
+                            dust_trimmed_paths.add(job.path_id)
+                        return
 
                     hop_scheduler.push(HopJob(
                         path_id=job.path_id,
@@ -2695,8 +2899,8 @@ class BaseTracer(ABC):
                         incoming_amount=bridge_step_amount,
                         incoming_time=int(dst_block_time) if dst_block_time else job.incoming_time,
                         chain=dst_chain_norm,
-                        asset=job.asset,
-                        token_id=int(new_token_id or job.token_id or 0),
+                        asset=new_asset,
+                        token_id=int(new_token_id or (job.token_id if not asset_changed else 0) or 0),
                         hop_index=job.hop_index + 1,
                         attributed_amount=bridge_raw_attr,
                     ))
@@ -2861,6 +3065,7 @@ class BaseTracer(ABC):
                     logger.warning(f"OTC-like analysis failed for {job.current_address}: {exc}")
 
             selector_result = None
+            hop_selector_decision: DecisionRef | None = None
             selected_hashes = self._accumulate_hashes(data_list, job.incoming_amount, job.chain, asset=job.asset)
             used_accumulation = bool(selected_hashes)
             if not selected_hashes and data_list:
@@ -2871,7 +3076,7 @@ class BaseTracer(ABC):
                     "incoming_time": job.incoming_time,
                     "txs": data_list,
                 }
-                selector_result = await self._run_selector(selector_context)
+                selector_result, hop_selector_decision = await self._run_selector(selector_context)
                 selected_hashes = (selector_result or {}).get("selected_hashes") or []
                 used_accumulation = False
             if not selected_hashes and data_list:
@@ -2893,6 +3098,16 @@ class BaseTracer(ABC):
             # outflow accumulation targets the true aggregate inflow.
             recipient_state: dict[str, dict[str, Any]] = {}
             used_base_path = False
+            # Snapshot the base path's step history BEFORE we touch it in
+            # this hop. When multiple outgoing txs are selected, the first
+            # one writes into ``base_path_id`` and subsequent ones fork
+            # via ``_copy_path`` — but a naive copy-at-fork-time inherits
+            # the first step too, so a non-dust sibling would drag a
+            # dust step into its rendered history and visualization would
+            # render the dust edge via the surviving path. Forking from
+            # this frozen snapshot keeps each branch clean.
+            base_steps_snapshot = [dict(s) for s in paths[base_path_id]["steps"]]
+            base_description = paths[base_path_id].get("description")
             # Pre-resolve all transfers for this hop's selected hashes in
             # parallel. Each _resolve_transfer is a pure read (1-2 HTTP calls)
             # with no shared-state mutation, so gathering them is safe. The
@@ -2943,9 +3158,22 @@ class BaseTracer(ABC):
                 else:
                     path_counter += 1
                     path_id = str(path_counter)
-                    _copy_path(path_id, base_path_id)
+                    # Fork from the FROZEN snapshot, not from the live
+                    # ``base_path_id`` whose steps now include the first
+                    # iteration's (possibly dust-trimmed) addition.
+                    paths[path_id] = {
+                        "path_id": path_id,
+                        "description": base_description,
+                        "steps": [dict(s) for s in base_steps_snapshot],
+                        "stop_reason": None,
+                    }
 
                 step_index = len(paths[path_id]["steps"])
+                _step_decisions = [
+                    d.model_dump()
+                    for d in (classifier_decision, hop_selector_decision)
+                    if d is not None
+                ]
                 _add_step(path_id, {
                     "step_index": step_index,
                     "from": job.current_address,
@@ -2961,6 +3189,7 @@ class BaseTracer(ABC):
                     "service_label": classification.get("service_label"),
                     "protocol": classification.get("protocol"),
                     "reasoning": (selector_result or {}).get("reasoning") or "Selected by hop selector.",
+                    "llm_decisions": _step_decisions,
                 })
 
                 self._collect_token_transfer_data(
@@ -2973,7 +3202,47 @@ class BaseTracer(ABC):
                     txs_seen,
                 )
 
-                if existing_state is None:
+                # Dust guard: the per-step filter is about OUTFLOW size
+                # relative to the stolen amount (operator rule: "don't
+                # chase anything under 1% of stolen funds"). We compare
+                # ``step_amount`` directly, NOT ``raw_attributed``.
+                # Attribution is FIFO-diluted — when an address holds a
+                # mix of stolen + non-stolen inflows, its theft-share
+                # ratio is <100% and the FIFO-returned attribution for a
+                # legit-sized outflow can dip below the stolen*ratio
+                # threshold even when the outflow itself is plainly
+                # above it (e.g. 663 USDT out of a 60k stolen pool =
+                # 1.1%, but FIFO attributes only 230 because 208k
+                # non-theft dollars sat in the queue, diluting the
+                # theft-share ratio). Dust-trimming those drops the
+                # hop unfairly and cuts the trace early.
+                dust_hit = (
+                    stolen_amount > 0
+                    and min_attribution_ratio > 0.0
+                    and step_amount < stolen_amount * min_attribution_ratio
+                )
+
+                if dust_hit:
+                    dust_pct = (raw_attributed / stolen_amount) * 100.0 if stolen_amount else 0.0
+                    paths[path_id]["stop_reason"] = (
+                        f"Below dust threshold ({dust_pct:.2f}% of stolen amount)"
+                    )
+                    path_seen_addresses.setdefault(path_id, set()).add(to_addr)
+                    if path_id not in dust_trimmed_paths:
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": "Dust Trimmed",
+                            "related_addresses": [to_addr],
+                            "related_steps": [f"{path_id}:{step_index}"],
+                            "text": (
+                                f"Branch trimmed at {self._format_address(to_addr)}: "
+                                f"attributed {raw_attributed:.2f} < "
+                                f"{min_attribution_ratio*100:.2f}% of stolen {stolen_amount:.2f}"
+                            ),
+                        })
+                        dust_trimmed_paths.add(path_id)
+                    took_step = True
+                elif existing_state is None:
                     new_job = HopJob(
                         path_id=path_id,
                         current_address=to_addr,
@@ -3395,43 +3664,6 @@ class BaseTracer(ABC):
         txs_out = [t for t in (txs or []) if t.get("hash") in keep_hashes][:max_items] if txs else txs
         return capped_list, txs_out
 
-    async def _retry_json_response(self, messages: list, message) -> dict[str, Any]:
-        """Retry to get valid JSON from LLM after failed parse."""
-        logger.info("[PROMPT=json_completion_retry]")
-        messages.append(self._coerce_message_dict(message))
-        messages.append({
-            "role": "user",
-            "content": "Your response was not valid JSON. Please provide the complete TraceResult as valid JSON only. No markdown, no explanations."
-        })
-        try:
-            with generation_span(
-                input=self._serialize_messages(messages),
-                model=self.model_json_retry,
-                model_config={"purpose": "json_retry"},
-            ) as gen_span:
-                retry_response = await asyncio.wait_for(
-                    self.openai_client.chat.completions.create(
-                        model=self.model_json_retry,
-                        messages=messages,
-                        tools=TOOLS,
-                        tool_choice="none",
-                        **self._max_tokens_arg(self.model_json_retry, 1200)
-                    ),
-                    timeout=60.0
-                )
-                try:
-                    if hasattr(gen_span, "span_data"):
-                        msg_dump = retry_response.choices[0].message.model_dump()
-                        gen_span.span_data.output = [msg_dump]
-                        gen_span.span_data.usage = self._normalize_usage(retry_response.usage)
-                except Exception:
-                    pass
-            retry_output = retry_response.choices[0].message.content or ""
-            retry_cleaned = self._strip_code_fences(retry_output)
-            return json.loads(retry_cleaned)
-        except Exception as e:
-            raise ValueError(f"Failed to get valid JSON after retry: {e}") from e
-
     # ─── Main trace entry point ───────────────────────────────────────────────
 
     async def trace(
@@ -3502,10 +3734,12 @@ class BaseTracer(ABC):
                 "description": config.description,
                 "stolen_amount": config.stolen_amount,
                 "traced_amount_tolerance": config.traced_amount_tolerance,
+                "min_path_attribution_ratio": config.min_path_attribution_ratio,
             },
             "cex_single_cluster_threshold": config.cex_single_cluster_threshold,
             "stolen_amount": config.stolen_amount or 0.0,
             "traced_amount_tolerance": config.traced_amount_tolerance,
+            "min_path_attribution_ratio": config.min_path_attribution_ratio,
             "rules_version": "orchestrator-unified-1",
         }
 

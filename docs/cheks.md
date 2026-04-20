@@ -9,3 +9,11 @@
 🔗 Transaction Hash: 0xe0c92b5519912358a0cb8c95dfc4831b083596db9ef81590463500480802ce86
 ⛓️ Blockchain: eth
 💰 Stolen Asset: ETH
+
+🔗 Transaction Hash: f8b7e4c2a8a68a59e946c5b2eb15e844c9b13c2e72395aa14f84f30c1df1f5f3
+⛓️ Blockchain: trx
+💰 Stolen Asset: usdt
+
+🔗 Transaction Hash: e9cbc26edbd53c08e26a3a65fad670ab89ef218dff75930e856bb1aaf9450b9d
+⛓️ Blockchain: btc
+💰 Stolen Asset: BTC

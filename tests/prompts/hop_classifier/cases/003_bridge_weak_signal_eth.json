@@ -1,0 +1,39 @@
+{
+  "name": "003_bridge_weak_signal_eth",
+  "prompt_name": "hop_classifier",
+  "prompt_version": "v1",
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium",
+  "input": {
+    "address": "0xb9a87ec86d6a7a4e4f98c9fef6c06f39e1ff4e7c",
+    "chain": "eth",
+    "asset": "USDT",
+    "incoming_tx_hash": "0x38e8",
+    "incoming_amount": 66030.0,
+    "get_address": {
+      "data": {
+        "owner": null,
+        "riskscore": 0.55
+      }
+    },
+    "get_extra_address_info": {
+      "data": {
+        "services": {"use_platform": ["LayerZero", "Bridgers.xyz Swap"]}
+      }
+    },
+    "owner_hint": null
+  },
+  "expected": {
+    "role": "bridge_service",
+    "terminal": false
+  },
+  "synthetic_response": {
+    "role": "bridge_service",
+    "terminal": false,
+    "stop_reason": null,
+    "labels": ["Bridge", "LayerZero"],
+    "notes": "use_platform indicates bridge interaction; ownership not confirmed so continue",
+    "service_label": "LayerZero",
+    "protocol": "layerzero"
+  }
+}

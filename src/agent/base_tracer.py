@@ -416,12 +416,18 @@ class BaseTracer(ABC):
 
     def __init__(self, *, recorder: "TraceRecorder | None" = None):
         import httpx
-        http_client = httpx.AsyncClient(
+        # Stash the httpx client for lazy reuse. AsyncOpenAI() calls
+        # os.environ.get("OPENAI_API_KEY") at construction and raises
+        # if unset — instantiating it in __init__ means every BaseTracer
+        # subclass (including no-LLM unit tests) would need the key. The
+        # lazy ``openai_client`` property below defers that check until
+        # the first real LLM call.
+        self._openai_http_client = httpx.AsyncClient(
             timeout=Timeout(OPENAI_TIMEOUT, connect=OPENAI_CONNECT_TIMEOUT),
             limits=Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
             http2=True,
         )
-        self.openai_client = AsyncOpenAI(http_client=http_client, max_retries=1)
+        self._openai_client: AsyncOpenAI | None = None
 
         self.model_orchestrator = ModelConfig.ORCHESTRATOR_MODEL
         self.model_selector = ModelConfig.SELECTOR_MODEL
@@ -439,6 +445,20 @@ class BaseTracer(ABC):
 
         # Recorder: optional record/replay of every LLM + tool call.
         self.recorder: TraceRecorder | None = recorder
+
+    @property
+    def openai_client(self) -> AsyncOpenAI:
+        """Lazily construct the AsyncOpenAI client.
+
+        Deferring this until first access keeps ``BaseTracer()`` usable
+        in unit tests that don't touch LLM paths and in CI environments
+        without ``OPENAI_API_KEY``.
+        """
+        client = self._openai_client
+        if client is None:
+            client = AsyncOpenAI(http_client=self._openai_http_client, max_retries=1)
+            self._openai_client = client
+        return client
 
     # ─── Abstract methods (implemented by subclasses) ─────────────────────────
 

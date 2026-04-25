@@ -40,7 +40,8 @@ Three signal sources, in decreasing priority. The strongest matching signal wins
    | `other` | `Bridge` | `bridge_service` (trigger bridge_analyze; continue on dst_chain) | **true** |
    | `other` | `DEX` | `dex_service` | **true** |
    | `other` | `miner`, `mining_pool`, `pool` | `unidentified_service` | **true** |
-   | `other` (with known bridge brand name: Allbridge, Bridgers, LayerZero, Stargate, Wormhole, Synapse, Hop, Multichain, Across, Router, Symbiosis, Mayan, cBridge, Celer, deBridge, Squid, Connext, Orbiter, Thorchain, Rango, Rubic) | — | `bridge_service` | **true** |
+   | `other` | `*Token Contract*` (e.g. `ERC/BEP-20 Token Contract`, `TRC-20 Token Contract`) | `bridge_service` (trigger bridge_analyze; LayerZero OFT contracts like `USDT0` mint/burn cross-chain when funds arrive) | **true** |
+   | `other` (with known bridge brand name: Allbridge, Bridgers, LayerZero, Stargate, USDT0/USDC0/BTCb0/OFT, NEAR Intents, NEAR Omni, Wormhole, Synapse, Hop, Multichain, Across, Router, Symbiosis, Mayan, cBridge, Celer, deBridge, Squid, Connext, Orbiter, Thorchain, Rango, Rubic) | — | `bridge_service` | **true** |
    | `other` (any other real `name`/`slug`) | — | `unidentified_service` (label = the name) | **true** |
    | `stolen_coins` | — | `intermediate` (label `"Stolen funds"`) | **false** — continue |
    | `unknown` (or anything not covered above) | — | `intermediate` | **false** |

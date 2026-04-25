@@ -30,3 +30,11 @@
 🔗 Transaction Hash: 0xcdabe9f7f614fe2720693c03643d1a6f8d68cd0a3fa1bfeaf77996ca999718eb
 ⛓️ Blockchain: bsc
 💰 Stolen Asset: USDT
+
+🔗 Transaction Hash: 58626b23a103ff95945481559bbd5c1ac234e0a788c631db2130b4089b0cd014
+⛓️ Blockchain: trx
+💰 Stolen Asset: USDT
+
+🔗 Transaction Hash: bbd7c0fa13282535849712bb04c0934f8f57789093157a3bcd652d063acb0888
+⛓️ Blockchain: trx
+💰 Stolen Asset: USDT

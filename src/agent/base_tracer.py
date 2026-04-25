@@ -79,6 +79,21 @@ class HopJob:
     token_id: int
     hop_index: int
     attributed_amount: float = 0.0  # FIFO-attributed theft-origin share
+    # Marks a job synthesized by DEX swap detection: the user wallet
+    # converted asset A → asset B in one tx and continues the trace
+    # on asset B from the SAME address. The scheduler's loop-
+    # detection (revisit-blocking) must let this through; the
+    # ``path_seen_addresses`` check is keyed on address-only and
+    # would otherwise dead-end the new asset on the very next pop.
+    is_swap_continuation: bool = False
+    # Override anchor for the dust-trim check, propagated from a
+    # swap-continuation parent through all its descendants. After a
+    # swap, ``stolen_amount`` is in the original asset's units (e.g.
+    # USDT) but ``step_amount`` is in the new asset's units (e.g.
+    # native TRX). Comparing 1000 TRX against 4805 USDT trims every
+    # legitimate downstream outflow as "dust" — see the bbd7c0fa
+    # regression. ``None`` means use the default anchor (``stolen_amount``).
+    effective_dust_anchor: float | None = None
 
 
 class HopScheduler:
@@ -848,6 +863,13 @@ class BaseTracer(ABC):
         # so the brand-name fallback is the only path that catches it.
         "near intent", "near intents", "near-intent", "near-intents",
         "near omni", "near-omni", "near one", "near-one",
+        # LayerZero OFT (Omnichain Fungible Token) brands — the contract
+        # itself is the bridge: sending USDT to ``USDT0`` triggers a
+        # cross-chain mint on the destination. The token-contract
+        # subtype check above already catches ``USDT0`` etc., but we
+        # list common OFT names here too in case the API returns a
+        # bare ``type="other"`` without a token-contract subtype.
+        "usdt0", "usdc0", "btcb0", "oft",
     })
 
     @classmethod
@@ -934,6 +956,23 @@ class BaseTracer(ABC):
             if subtype == "dex":
                 return {
                     "role": "dex_service", "terminal": True,
+                    "service_label": identity, "protocol": identity.lower(),
+                }
+            # Token-contract subtype (e.g. ``"ERC/BEP-20 Token Contract"``,
+            # ``"TRC-20 Token Contract"``) — the address IS the token
+            # contract itself, not a destination wallet. Sending tokens
+            # to a token contract is almost always one of:
+            #   * LayerZero OFT mint/burn (USDT0 → ETH bridge),
+            #   * wrapped-token wrap/unwrap,
+            #   * a misdirected transfer.
+            # Classify as ``bridge_service`` so the existing handler runs
+            # ``bridge_analyze`` on the incoming tx; if a cross-chain
+            # destination shows up we follow it, otherwise we annotate
+            # "destination unknown" instead of mislabeling the contract
+            # as an opaque "Suspected unidentified service".
+            if "token contract" in subtype:
+                return {
+                    "role": "bridge_service", "terminal": True,
                     "service_label": identity, "protocol": identity.lower(),
                 }
             # Brand-name fallback: map well-known cross-chain bridges by
@@ -1050,6 +1089,200 @@ class BaseTracer(ABC):
         for entry in by_brand.values():
             if entry["vol"] / total_volume >= threshold:
                 return entry["owner"]
+        return None
+
+    # Wrapped-native token symbols per chain — the WRAPPER variant
+    # (WTRX / WETH / WBNB / WMATIC / WAVAX). Used as one of two
+    # signals to detect "this transfer's recipient really receives the
+    # native asset after an in-tx unwrap". The other signal is the
+    # registry's ``name`` field starting with ``"Wrapped "`` — that
+    # one works even on TRX, where the SAILS registry stores the WTRX
+    # variant under ``symbol="TRX"`` (same as native) with ``token_id``
+    # 1584. When a DEX atomic swap delivers a wrapped-native and
+    # immediately calls ``Withdraw`` to unwrap, the user receives the
+    # native asset; the TRC20 events list shows only the wrapped leg
+    # (which we use for fiat-matching), so we remap the wrapped
+    # token_id back to ``0`` (native) for the continuation HopJob.
+    _WRAPPED_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
+        "trx": frozenset({"WTRX"}),
+        "eth": frozenset({"WETH"}),
+        "bsc": frozenset({"WBNB"}),
+        "matic": frozenset({"WMATIC", "WPOL"}),
+        "arb": frozenset({"WETH"}),
+        "op": frozenset({"WETH"}),
+        "base": frozenset({"WETH"}),
+        "avax": frozenset({"WAVAX"}),
+    }
+
+    def _is_wrapped_native(
+        self, chain: str, symbol: str | None, name: str | None = None,
+        token_id: int | None = None,
+    ) -> bool:
+        """Detect if a (chain, symbol/name/token_id) tuple identifies a
+        wrapped-native token. Triggers on either:
+
+          * ``symbol`` matches ``_WRAPPED_NATIVE_SYMBOLS`` for the
+            chain (e.g. ``"WETH"`` on eth, ``"WBNB"`` on bsc), OR
+          * registry ``name`` starts with ``"Wrapped "`` AND
+            ``token_id != 0`` — covers TRX where the WTRX entry
+            stores ``symbol="TRX"`` (same as native) and the only
+            distinguishing field is the name.
+        """
+        chain_lc = (chain or "").lower()
+        if symbol:
+            sym_upper = symbol.upper()
+            if sym_upper in self._WRAPPED_NATIVE_SYMBOLS.get(
+                chain_lc, frozenset(),
+            ):
+                return True
+        if name and (token_id or 0) != 0:
+            if str(name).strip().lower().startswith("wrapped "):
+                return True
+        return False
+
+    def _native_symbol_for_chain(self, chain: str) -> str:
+        natives = {
+            "trx": "TRX", "eth": "ETH", "bsc": "BNB", "matic": "MATIC",
+            "arb": "ETH", "op": "ETH", "base": "ETH", "avax": "AVAX",
+            "btc": "BTC", "ltc": "LTC", "bch": "BCH", "sol": "SOL",
+        }
+        return natives.get((chain or "").lower(), (chain or "").upper())
+
+    def _detect_dex_swap_out(
+        self,
+        transfers: list[dict[str, Any]],
+        current_address: str,
+        swap_in_token_id: int,
+        swap_in_amount_display: float,
+        chain: str,
+        fiat_tolerance: float = 0.05,
+    ) -> dict[str, Any] | None:
+        """Detect a DEX atomic swap-out within a single tx's
+        ``token_transfers`` list.
+
+        SunSwap / PancakeSwap / Uniswap-class swaps appear as ≥ 2
+        transfers in the same tx:
+
+          * user → pool : token A (the swap-in we already see)
+          * pool → unwrap-helper or user : token B (the swap-out)
+
+        Native unwrapping (``WTRX → TRX``, ``WETH → ETH``) happens
+        AFTER the wrapped transfer via a ``Withdrawal`` event +
+        internal call — those don't show up in TRC20 events. We
+        treat the wrapped transfer's recipient as the swap-out
+        anchor and remap the wrapped token to the chain's native
+        token_id (=0).
+
+        Match criterion: |swap_in_fiat − swap_out_fiat| / max ≤
+        ``fiat_tolerance`` (default 5%).
+
+        Args:
+            transfers: Raw ``data`` array from ``token_transfers``.
+            current_address: User wallet that initiated the swap.
+            swap_in_token_id: token_id of asset A (already known).
+            swap_in_amount_display: Asset A amount in *display* units
+                (post-``_normalize_amount``).
+            chain: Internal chain code (``"trx"``, ``"eth"``, …).
+            fiat_tolerance: Acceptable fractional fiat-value mismatch.
+
+        Returns the swap-out info dict on match::
+
+            {
+              "token_id": int,         # native if wrapped, else raw
+              "amount": float,         # display units
+              "asset_symbol": str,     # native symbol if wrapped
+              "swap_out_address": str, # whoever received the wrapped
+              "raw_token_id": int,
+              "raw_amount": float,
+              "fiat_rate": float,
+              "fiat_value": float,
+            }
+
+        Returns ``None`` if no swap-out is detected.
+        """
+        if not transfers or len(transfers) < 2:
+            return None
+        try:
+            swap_in_token_id = int(swap_in_token_id or 0)
+        except (TypeError, ValueError):
+            return None
+
+        # Pin the swap-in fiat anchor by finding the matching
+        # transfer in the raw list (rate may differ slightly from
+        # whatever the caller stored upstream).
+        swap_in_fiat = 0.0
+        for tr in transfers:
+            try:
+                tid = int(tr.get("token_id") or tr.get("tokenId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tid != swap_in_token_id:
+                continue
+            inp = tr.get("input") if isinstance(tr.get("input"), dict) else {}
+            if (inp or {}).get("address") != current_address:
+                continue
+            try:
+                rate = float(tr.get("fiat_rate") or tr.get("fiatRate") or 0)
+            except (TypeError, ValueError):
+                continue
+            if rate <= 0:
+                continue
+            swap_in_fiat = float(swap_in_amount_display or 0.0) * rate
+            break
+
+        if swap_in_fiat <= 0:
+            return None
+
+        from .currency_registry import get_registry
+        registry = get_registry()
+
+        for tr in transfers:
+            try:
+                tid = int(tr.get("token_id") or tr.get("tokenId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tid == swap_in_token_id:
+                continue
+            try:
+                amt_raw = float(tr.get("amount") or 0.0)
+                rate = float(tr.get("fiat_rate") or tr.get("fiatRate") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if amt_raw <= 0 or rate <= 0:
+                continue
+
+            rec = registry.lookup(chain, tid)
+            symbol = (rec.symbol if rec else None) or ""
+            amt_display = self._normalize_amount(amt_raw, chain, symbol)
+            out_fiat = amt_display * rate
+            if out_fiat <= 0:
+                continue
+            delta = abs(out_fiat - swap_in_fiat) / max(out_fiat, swap_in_fiat)
+            if delta > fiat_tolerance:
+                continue
+
+            # Wrapped-native → native remap.
+            rec_name = (rec.name if rec else None)
+            if self._is_wrapped_native(chain, symbol, rec_name, tid):
+                new_token_id = 0
+                new_symbol = self._native_symbol_for_chain(chain)
+            else:
+                new_token_id = tid
+                new_symbol = symbol.upper()
+
+            output_block = tr.get("output") if isinstance(tr.get("output"), dict) else {}
+            out_addr = (output_block or {}).get("address") or tr.get("to")
+            return {
+                "token_id": new_token_id,
+                "amount": amt_display,
+                "asset_symbol": new_symbol,
+                "swap_out_address": out_addr,
+                "raw_token_id": tid,
+                "raw_amount": amt_raw,
+                "fiat_rate": rate,
+                "fiat_value": out_fiat,
+            }
+
         return None
 
     def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> dict[str, Any]:
@@ -1337,6 +1570,7 @@ class BaseTracer(ABC):
         max_select: int = 25,
         *,
         hop_index: int | None = None,
+        is_swap_continuation: bool = False,
     ) -> list[str]:
         """Chronological accumulation per trace_orchestrator.md.
 
@@ -1370,6 +1604,16 @@ class BaseTracer(ABC):
         ``hop_index=None`` keeps the legacy "activate unconditionally"
         behavior for callers that don't know their hop depth (eg. seed
         expansion from a victim address before hop 1 formally starts).
+
+        ``is_swap_continuation`` disables the hop≥2 oversized-skip
+        unconditionally. The reasoning: a swap-continuation HopJob
+        re-enters the SAME user wallet on a new asset, but its
+        ``incoming_amount`` reflects only the FIRST swap-out leg
+        (e.g. 31k TRX from a 10k USDT swap) even when the user actually
+        chained 4 swaps that summed to ~1.5M TRX. Every subsequent
+        native-asset outflow then looks "oversized" against the 31k
+        anchor and gets skipped. Skip the skip — there's no mixed-funds
+        concern when source == owner.
         """
         if not txs:
             return []
@@ -1380,7 +1624,18 @@ class BaseTracer(ABC):
         accumulated = 0.0
         incoming = float(incoming_amount)
         mixed_funds_threshold = incoming * self._MIXED_FUNDS_RATIO
-        mixed_funds_enabled = hop_index is None or hop_index <= 1
+        # Swap-continuation HopJobs re-enter the user's OWN wallet on
+        # the post-swap asset; ``incoming_amount`` reflects only the
+        # FIRST swap-out leg even when the user chained several swaps,
+        # so any single downstream outflow can legitimately exceed the
+        # threshold without being "mixed funds". Treat them like hop-1
+        # for the mixed-funds detector AND skip the oversized-skip:
+        # this widens selection so all chained-swap tail outflows make
+        # it into the trace instead of stopping at the first one that
+        # crosses the under-anchored incoming.
+        mixed_funds_enabled = (
+            hop_index is None or hop_index <= 1 or is_swap_continuation
+        )
         mixed_funds_detected = False
         # On hop_index >= 2, skip individual outflows that alone exceed
         # ``MIXED_FUNDS_RATIO × incoming`` — they almost certainly carry
@@ -1579,6 +1834,11 @@ class BaseTracer(ABC):
         txs_collected: list[dict[str, Any]] = []
         tx_list_collected: list[dict[str, Any]] = []
         txs_seen: set = set()
+        # Cache of the raw ``token_transfers.data`` array per tx hash.
+        # Used by DEX swap-detection to fiat-match the swap-in transfer
+        # against the swap-out wrapped/native transfer in the SAME tx
+        # without paying for a second ``token_transfers`` call.
+        raw_token_transfers_by_hash: dict[str, list[dict[str, Any]]] = {}
 
         stolen_amount = float(inputs.get("stolen_amount") or payload.get("stolen_amount") or 0.0)
         traced_tolerance = float(inputs.get("traced_amount_tolerance") or payload.get("traced_amount_tolerance") or 0.03)
@@ -1981,6 +2241,13 @@ class BaseTracer(ABC):
                     "tx_hash": tx_hash_val,
                     "blockchain_name": chain_name,
                 })
+                # Stash the raw transfers list keyed on tx hash so the
+                # DEX swap-detector can scan ALL transfers in this tx
+                # (swap-in + swap-out) without an extra round-trip.
+                if isinstance(transfer_result, dict) and tx_hash_val:
+                    raw_data = transfer_result.get("data")
+                    if isinstance(raw_data, list):
+                        raw_token_transfers_by_hash[tx_hash_val] = raw_data
                 # For a known token tx, pass the tx's token_id explicitly
                 # so _parse_transfer can filter out other tokens moved in
                 # the same tx (multi-token swap routers etc.).
@@ -2065,6 +2332,7 @@ class BaseTracer(ABC):
             page_limit: int = 50,
             incoming_amount: float | None = None,
             asset: str | None = None,
+            strict_token_id: bool = False,
         ) -> list[dict[str, Any]]:
             """Fetch outgoing txs with pagination, ordered by time asc.
 
@@ -2080,6 +2348,17 @@ class BaseTracer(ABC):
             positive, so the server-side withdrawal filter silently drops
             them even though the specific token clearly flowed out. The
             fallback recovers those missing outflows.
+
+            ``strict_token_id`` post-filters the returned list to only
+            transactions matching the requested ``token_id`` (including
+            ``0`` for native). Used by DEX swap-continuation HopJobs:
+            after a USDT→TRX swap on SunSwap, the user's wallet has
+            outflows in BOTH assets and the server-side filter for
+            ``token_id=0`` is a no-op (historical behavior — native
+            doesn't get a token-filter), so the accumulator otherwise
+            sees mixed-asset txs and starts picking already-seen USDT
+            ones, leaving only one TRX outflow rendered. Strict mode
+            drops the wrong-asset rows before the accumulator runs.
             """
 
             def _ingest(items: list[dict[str, Any]], bucket: dict[str, dict[str, Any]]) -> None:
@@ -2087,6 +2366,23 @@ class BaseTracer(ABC):
                     tx_h = item.get("hash")
                     if not tx_h:
                         continue
+                    if strict_token_id and token_id is not None:
+                        item_tid = item.get("token_id")
+                        try:
+                            if int(item_tid) != int(token_id):
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        # Drop fee-only paired rows (token_id=0 gas entries on
+                        # TRX-USDT swap txs) that would otherwise let the
+                        # accumulator pull the swap tx into a native-asset
+                        # continuation job and register phantom edges.
+                        try:
+                            amt = float(item.get("amount_coerced") or 0)
+                        except (TypeError, ValueError):
+                            amt = 0.0
+                        if amt <= 0:
+                            continue
                     bucket[tx_h] = item
                     all_txs_map[tx_h] = item
 
@@ -3174,7 +3470,16 @@ class BaseTracer(ABC):
                 )
                 return
 
-            # Find next outgoing transactions (chronological accumulation)
+            # Find next outgoing transactions (chronological accumulation).
+            # ``strict_token_id`` is forced ON for swap-continuation
+            # HopJobs because the user's wallet now mixes the original
+            # asset (USDT) and the post-swap asset (native TRX). Without
+            # the strict filter the accumulator picks already-seen USDT
+            # txs whose fiat happens to match, and only one of the new
+            # TRX outflows survives the for-loop's path_seen_hashes
+            # guard. (For non-swap jobs we keep the historical
+            # ``token_id=0 == no filter`` behavior so seed-flow stays
+            # asset-agnostic.)
             data_list = await _fetch_outgoing_txs(
                 job.current_address,
                 job.chain,
@@ -3182,6 +3487,7 @@ class BaseTracer(ABC):
                 job.token_id,
                 incoming_amount=job.incoming_amount,
                 asset=job.asset,
+                strict_token_id=job.is_swap_continuation,
             )
             # If no results with specific token, retry with native token (asset conversion on exchange)
             if not data_list and job.token_id not in (None, 0):
@@ -3522,6 +3828,7 @@ class BaseTracer(ABC):
             selected_hashes = self._accumulate_hashes(
                 data_list, job.incoming_amount, job.chain, asset=job.asset,
                 hop_index=job.hop_index,
+                is_swap_continuation=job.is_swap_continuation,
             )
             used_accumulation = bool(selected_hashes)
             if not selected_hashes and data_list:
@@ -3672,14 +3979,31 @@ class BaseTracer(ABC):
                 # non-theft dollars sat in the queue, diluting the
                 # theft-share ratio). Dust-trimming those drops the
                 # hop unfairly and cuts the trace early.
+                #
+                # When the parent job is a swap-continuation, ``step_amount``
+                # is denominated in the post-swap asset (e.g. native TRX)
+                # while ``stolen_amount`` is in the original asset
+                # (e.g. USDT). Comparing 1000 TRX < 4805 USDT is unit-mixing
+                # and would trim every legitimate post-swap outflow as
+                # "dust". Use the propagated swap-continuation anchor
+                # whenever it's set — ``effective_dust_anchor`` flows from
+                # the swap-continuation HopJob through all its descendants
+                # so HopJobs several hops downstream of a swap (which are
+                # NOT themselves swap-continuations) still anchor in the
+                # right asset's units.
+                dust_anchor = stolen_amount
+                if job.effective_dust_anchor and job.effective_dust_anchor > 0:
+                    dust_anchor = float(job.effective_dust_anchor)
+                elif job.is_swap_continuation and job.incoming_amount and job.incoming_amount > 0:
+                    dust_anchor = float(job.incoming_amount)
                 dust_hit = (
-                    stolen_amount > 0
+                    dust_anchor > 0
                     and min_attribution_ratio > 0.0
-                    and step_amount < stolen_amount * min_attribution_ratio
+                    and step_amount < dust_anchor * min_attribution_ratio
                 )
 
                 if dust_hit:
-                    dust_pct = (raw_attributed / stolen_amount) * 100.0 if stolen_amount else 0.0
+                    dust_pct = (raw_attributed / dust_anchor) * 100.0 if dust_anchor else 0.0
                     # Dust-aggregate onto an already-active path must NOT
                     # mark that path "completed". When ``existing_state`` is
                     # set the path_id was taken from a prior non-dust
@@ -3736,6 +4060,11 @@ class BaseTracer(ABC):
                         token_id=int(token_id or 0),
                         hop_index=job.hop_index + 1,
                         attributed_amount=raw_attributed,
+                        # Inherit the parent's swap-continuation dust anchor.
+                        # If the parent is several hops downstream of a swap
+                        # (so this child is on the post-swap asset), the
+                        # global ``stolen_amount`` is in the wrong units.
+                        effective_dust_anchor=job.effective_dust_anchor,
                     )
                     hop_scheduler.push(new_job)
                     recipient_state[to_addr] = {
@@ -3745,6 +4074,93 @@ class BaseTracer(ABC):
                         "total_attributed": raw_attributed,
                         "earliest_time": block_time,
                     }
+
+                    # === DEX swap-continuation detection ===
+                    # When the recipient is a DEX pool (SunSwap /
+                    # PancakeSwap / Uniswap-class), the same on-chain tx
+                    # often contains BOTH the user's swap-in (token A)
+                    # and the pool's swap-out (token B → unwrap helper
+                    # → user). The native side of WTRX/WETH/WBNB
+                    # unwraps via internal calls invisible in TRC20
+                    # events, but the wrapped transfer IS visible, so
+                    # we fiat-match against it and continue tracing
+                    # the user's wallet on the new asset.
+                    output_owner_blk = transfer.get("output_owner")
+                    is_dex_recipient = False
+                    if isinstance(output_owner_blk, dict):
+                        ot = (output_owner_blk.get("type") or "").lower()
+                        ost = (output_owner_blk.get("subtype") or "").lower()
+                        is_dex_recipient = (
+                            ot.startswith("p2p_exchange") or ost == "dex"
+                        )
+                    raw_transfers = (
+                        raw_token_transfers_by_hash.get(sel_hash) or []
+                    )
+                    if is_dex_recipient and raw_transfers:
+                        swap_out = self._detect_dex_swap_out(
+                            raw_transfers,
+                            current_address=job.current_address,
+                            swap_in_token_id=int(token_id or 0),
+                            swap_in_amount_display=step_amount,
+                            chain=job.chain,
+                        )
+                    else:
+                        swap_out = None
+                    if swap_out:
+                        new_token_id = int(swap_out.get("token_id") or 0)
+                        new_amount = float(swap_out.get("amount") or 0.0)
+                        new_symbol = (
+                            swap_out.get("asset_symbol")
+                            or self._native_symbol_for_chain(job.chain)
+                        )
+                        # Re-anchor attribution on the destination
+                        # asset (mirrors the asset-changed bridge case
+                        # in the existing handler): swap rewrites the
+                        # FIFO basis, so the new asset's full amount
+                        # is what we'll trace forward.
+                        fifo_ledger.record_inflow(
+                            job.current_address, new_amount, new_amount,
+                        )
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": "DEX Swap",
+                            "related_addresses": [
+                                job.current_address, to_addr,
+                            ],
+                            "related_steps": [
+                                f"{path_id}:{step_index}"
+                            ],
+                            "text": (
+                                f"DEX swap detected at {self._format_address(job.current_address)}: "
+                                f"{step_amount:,.4f} {job.asset or '?'} → "
+                                f"{new_amount:,.4f} {new_symbol} "
+                                f"via {(output_owner_blk or {}).get('name') or 'DEX'}. "
+                                f"Continuing trace on {new_symbol}."
+                            ),
+                        })
+                        logger.info(
+                            "DEX swap-out at %s: %.4f %s → %.4f %s "
+                            "(via %s, fiat≈$%.2f); pushing swap-continuation HopJob",
+                            self._format_address(job.current_address),
+                            step_amount, job.asset or "?",
+                            new_amount, new_symbol,
+                            (output_owner_blk or {}).get("name") or "DEX",
+                            swap_out.get("fiat_value") or 0.0,
+                        )
+                        hop_scheduler.push(HopJob(
+                            path_id=path_id,
+                            current_address=job.current_address,
+                            incoming_tx_hash=sel_hash,
+                            incoming_amount=new_amount,
+                            incoming_time=block_time,
+                            chain=job.chain,
+                            asset=new_symbol,
+                            token_id=new_token_id,
+                            hop_index=job.hop_index + 1,
+                            attributed_amount=new_amount,
+                            is_swap_continuation=True,
+                            effective_dust_anchor=new_amount,
+                        ))
                 else:
                     # Aggregate repeat send into the queued HopJob so the
                     # recipient's outflow accumulation (driven by
@@ -3813,7 +4229,18 @@ class BaseTracer(ABC):
                     logger.info("Path %s stopped at %s (hop %d): max hops", job.path_id, self._format_address(job.current_address), job.hop_index)
                     continue
 
-                if job.current_address in path_seen_addresses.get(job.path_id, set()):
+                # ``is_swap_continuation`` HopJobs intentionally re-
+                # enter the user's wallet on a NEW asset (USDT → TRX
+                # via DEX). The default loop-detection keys on address
+                # alone, which would dead-end the swap before the new
+                # asset's outflows are even fetched. Skip the check
+                # for these synthesized jobs; the underlying
+                # outflow-fetch is filtered by the new ``token_id``,
+                # so we won't re-process the same edges.
+                if (
+                    job.current_address in path_seen_addresses.get(job.path_id, set())
+                    and not job.is_swap_continuation
+                ):
                     fifo_ledger.claim_terminal(job.attributed_amount)
                     paths[job.path_id]["stop_reason"] = "Loop detected - address revisited"
                     logger.info("Path %s stopped at %s (hop %d): loop detected", job.path_id, self._format_address(job.current_address), job.hop_index)

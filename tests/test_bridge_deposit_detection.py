@@ -103,6 +103,77 @@ class TestNearIntentsBrandClassification:
             assert result["role"] != "bridge_service"
 
 
+class TestTokenContractClassifiesAsBridge:
+    """LayerZero OFT contracts (USDT0 etc.) come back as
+    ``{type: "other", subtype: "ERC/BEP-20 Token Contract"}``. They're
+    not opaque "unidentified services" — sending tokens to them
+    triggers a cross-chain mint/burn. Classify as ``bridge_service``
+    so the existing bridge handler runs ``bridge_analyze`` on the
+    incoming tx and follows any cross-chain destination."""
+
+    def test_layerzero_oft_usdt0_classifies_as_bridge(self):
+        owner = {
+            "name": "USDT0",
+            "slug": "USDT0",
+            "type": "other",
+            "subtype": "ERC/BEP-20 Token Contract",
+        }
+        result = BaseTracer._classify_by_owner_type(owner)
+        assert result is not None
+        assert result["role"] == "bridge_service"
+        assert result["terminal"] is True
+        assert result["service_label"] == "USDT0"
+
+    def test_trc20_token_contract_also_classifies_as_bridge(self):
+        """Subtype matching is substring on lowercase form, so any
+        ``*Token Contract*`` variant fires (TRC-20, BEP-20, ERC-20,
+        future chain-specific variants)."""
+        for subtype in (
+            "TRC-20 Token Contract",
+            "ERC-20 Token Contract",
+            "BEP-20 Token Contract",
+            "Solana Token Contract",
+        ):
+            owner = {
+                "name": "SomeOFT",
+                "slug": "SomeOFT",
+                "type": "other",
+                "subtype": subtype,
+            }
+            result = BaseTracer._classify_by_owner_type(owner)
+            assert result is not None, f"no classification for subtype={subtype!r}"
+            assert result["role"] == "bridge_service", (
+                f"subtype={subtype!r} must classify as bridge_service "
+                f"so bridge_analyze can resolve cross-chain destination; "
+                f"got {result}"
+            )
+
+    def test_token_contract_subtype_takes_priority_over_brand_fallback(self):
+        """Token-contract detection must run BEFORE the brand-name
+        fallback so we don't depend on brand presence to catch OFTs.
+        ``"USDT0"`` IS in ``_BRIDGE_BRAND_NAMES`` (defense in depth),
+        but the structural subtype check should also cover unknown
+        OFT brands the registry doesn't know about yet."""
+        owner = {
+            "name": "ZZUnknownOFT",  # NOT in brand allowlist
+            "slug": "zz-unknown-oft",
+            "type": "other",
+            "subtype": "ERC-20 Token Contract",
+        }
+        result = BaseTracer._classify_by_owner_type(owner)
+        assert result is not None
+        assert result["role"] == "bridge_service"
+        assert result["service_label"] == "ZZUnknownOFT"
+
+    def test_usdt0_listed_in_bridge_brand_allowlist(self):
+        """Defense in depth: even if the API drops the
+        ``Token Contract`` subtype, ``USDT0`` should still be picked
+        up by the brand-name fallback."""
+        assert "usdt0" in BaseTracer._BRIDGE_BRAND_NAMES
+        assert "usdc0" in BaseTracer._BRIDGE_BRAND_NAMES
+        assert "oft" in BaseTracer._BRIDGE_BRAND_NAMES
+
+
 # ---- _owner_matches_bridge_brand ----
 
 class TestOwnerMatchesBridgeBrand:

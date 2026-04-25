@@ -107,12 +107,22 @@ def postprocess_trace_result(trace_result: TraceResult) -> TraceResult:
                 step.step_index = len(current_steps)
                 current_steps.append(step)
             else:
-                # Split path due to sibling branch
+                # Split path due to sibling branch.
+                # Only the FINAL split (the one containing the original
+                # path's last step) inherits the original ``stop_reason``.
+                # Earlier splits get ``stop_reason=None`` because they
+                # broke off before any terminal/dust event fired — the
+                # operator's stop reason was attached to the LAST step,
+                # not retroactively to every sibling. Without this guard
+                # a single dust step at the tail of the path silently
+                # propagates "Below dust threshold" to every preceding
+                # split, and the visualization's dust-trim then drops
+                # the last step of every legitimate sibling sub-path.
                 new_paths.append(Path(
                     path_id=path.path_id if split_index == 0 else f"{path.path_id}.{split_index+1}",
                     description=path.description,
                     steps=current_steps,
-                    stop_reason=path.stop_reason,
+                    stop_reason=None,
                 ))
                 annotations.append(Annotation(
                     id=f"ann-{annotation_counter}",

@@ -259,6 +259,14 @@ class MCPHTTPClient:
 
         loop = asyncio.get_event_loop()
         future: asyncio.Future[Any] = loop.create_future()
+        # Silence "Future exception was never retrieved" warnings. The
+        # future only exists so other in-flight waiters can ride on the
+        # same call — when no sibling waits, Python's asyncio sees an
+        # unobserved exception and logs a noisy traceback that duplicates
+        # the one ``base_tracer._call_tool`` already prints with full
+        # context. Attaching a no-op callback marks the exception as
+        # retrieved without losing the real raise path below.
+        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
         self._inflight[key] = future
         try:
             result = await self._call_tool_uncached(tool_name, arguments)
@@ -277,25 +285,72 @@ class MCPHTTPClient:
     async def _call_tool_uncached(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Raw HTTP POST to the MCP /api/tools/call endpoint."""
         url = f"{self.mcp_server_url}/api/tools/call"
+        request_payload = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "user_id": self.user_id,
+        }
 
-        response = await self.client.post(
-            url,
-            json={
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "user_id": self.user_id
-            },
-            headers={
-                "X-User-Id": self.user_id,
-                "Content-Type": "application/json"
-            }
-        )
+        try:
+            response = await self.client.post(
+                url,
+                json=request_payload,
+                headers={
+                    "X-User-Id": self.user_id,
+                    "Content-Type": "application/json",
+                },
+            )
+        except httpx.HTTPError as exc:
+            # Transport-level failure (DNS, conn refused, timeout). Attach
+            # the request body so base_tracer's error logger can surface
+            # it alongside the tool name.
+            exc.response_body = None  # type: ignore[attr-defined]
+            exc.response_status = None  # type: ignore[attr-defined]
+            exc.request_body = request_payload  # type: ignore[attr-defined]
+            raise
 
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Capture the response body BEFORE httpx's
+            # ``raise_for_status`` strips it, so the outer error log can
+            # show upstream error text (e.g. a 500 from
+            # api.bridge-detector.amlbot.com surfaced via MCP 200 wrapper
+            # or a 5xx from MCP itself).
+            try:
+                body = response.text
+            except Exception:
+                body = None
+            err = httpx.HTTPStatusError(
+                f"HTTP {response.status_code} from MCP {url}",
+                request=response.request,
+                response=response,
+            )
+            err.response_body = body  # type: ignore[attr-defined]
+            err.response_status = response.status_code  # type: ignore[attr-defined]
+            err.request_body = request_payload  # type: ignore[attr-defined]
+            raise err
+
         data = response.json()
 
         if not data.get("success"):
-            raise Exception(data.get("error", "Unknown error"))
+            # MCP wraps tool errors in a 200 response with success=False.
+            # Attach the full body so the tool-level exception surfaces
+            # upstream detail (e.g. the bridge-detector 500 message).
+            # ``data.get("error")`` often comes back empty on unexpected
+            # upstream failures — fall back to a message that at least
+            # names the tool + chain + body so the asyncio
+            # "Exception('')" noise stops being the only clue.
+            raw_err = data.get("error") or ""
+            if not raw_err:
+                raw_err = (
+                    f"MCP returned success=false with empty error field "
+                    f"for tool {tool_name!r}; full body: {data!r}"
+                )
+            exc = Exception(raw_err)
+            exc.response_body = data  # type: ignore[attr-defined]
+            exc.response_status = response.status_code  # type: ignore[attr-defined]
+            exc.request_body = request_payload  # type: ignore[attr-defined]
+            exc.tool_name = tool_name  # type: ignore[attr-defined]
+            raise exc
 
         return data.get("result")
 
@@ -352,10 +407,28 @@ class MCPHTTPClient:
             "asset": asset
         })
 
-    async def bridge_analyze(self, chain: str, tx_hash: str) -> dict[str, Any]:
-        """Analyze bridge transaction."""
+    async def bridge_analyze(
+        self, chain: str, tx_hash: str, model: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyze bridge transaction.
+
+        ``chain`` is translated to the bridge-detector's vocabulary
+        (``trx → tron`` etc.) right here so every direct caller
+        (``api.py``, ``deterministic_tracer.py``, the dispatch table)
+        gets the same mapping. Keeping a local translation instead of
+        leaning on ``tool_dispatch._bridge_chain`` means the fix is also
+        active when ``bridge_analyze`` is invoked outside the dispatch
+        table.
+
+        ``model`` selects the upstream analyzer version (the bridge-
+        detector treats it as a required body field). Defaults to the
+        pinned id from ``tool_dispatch`` so direct callers that don't
+        pass it explicitly stay on the same model as the trace agent.
+        """
+        from agent.tool_dispatch import BRIDGE_ANALYZER_MODEL, _bridge_chain
         return await self.call_tool("bridge-analyze", {
-            "chain": chain,
+            "model": model or BRIDGE_ANALYZER_MODEL,
+            "chain": _bridge_chain(chain),
             "tx_hash": tx_hash
         })
 
@@ -386,9 +459,11 @@ class MCPHTTPClient:
             "path": path
         })
 
-    async def bridge_analyzer(self, chain: str, tx_hash: str) -> dict[str, Any]:
+    async def bridge_analyzer(
+        self, chain: str, tx_hash: str, model: str | None = None,
+    ) -> dict[str, Any]:
         """Alias for bridge_analyze for compatibility."""
-        return await self.bridge_analyze(chain, tx_hash)
+        return await self.bridge_analyze(chain, tx_hash, model=model)
 
     async def save_and_share_visualization(self, data: dict[str, Any]) -> dict[str, Any]:
         """Save and share visualization."""

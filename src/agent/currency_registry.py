@@ -64,7 +64,7 @@ EXTERNAL_CHAIN_MAP: dict[str, str] = {
     "moonbeam": "glmr", "glmr": "glmr",
     "harmony": "one", "one": "one",
     # Non-EVM
-    "tron": "trx", "trx": "trx",
+    "tron": "trx", "tron-mainnet": "trx", "trx": "trx",
     "solana": "sol", "sol": "sol",
     "cardano": "ada", "ada": "ada",
     "ripple": "xrp", "xrp": "xrp",

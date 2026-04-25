@@ -67,7 +67,10 @@ def _lookup_currency(chain: str, token_id: int) -> dict[str, Any] | None:
 # sync with _EVM_NATIVE_CHAINS defaults in base_tracer; BTC-family is 8.
 # Registry wins whenever it has an entry, so these only fire for chains
 # we haven't yet indexed.
-_NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bnb": 9, "matic": 9}
+#
+# Chain *codes* match the rest of the codebase (``bsc``, not ``bnb``);
+# ``bnb`` is the native asset *symbol* on BSC, not a chain code.
+_NATIVE_UNIT_MAP = {"btc": 8, "bch": 8, "ltc": 8, "eth": 9, "bsc": 9, "matic": 9}
 _TOKEN_UNIT_MAP = {
     "USDT": 6, "USDC": 6, "DAI": 18, "BUSD": 18,
     "WETH": 18, "WBTC": 8, "LINK": 18, "UNI": 18,
@@ -75,7 +78,7 @@ _TOKEN_UNIT_MAP = {
 }
 _CURRENCY_NAMES = {
     "eth": "Ethereum", "btc": "Bitcoin", "trx": "TRON",
-    "bnb": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
+    "bsc": "BNB Chain", "matic": "Polygon", "bch": "Bitcoin Cash",
     "ltc": "Litecoin", "sol": "Solana",
 }
 
@@ -93,11 +96,19 @@ def _build_currency_info(
     """
     rec = _lookup_currency(chain, token_id)
     if rec:
+        symbol = rec.get("symbol") or chain
+        # Native asset symbols are emitted lower-case in the platform
+        # payload (``"bnb"`` on bsc, ``"trx"`` on trx, ``"eth"`` on eth)
+        # while non-native token symbols stay upper-case (``"USDT"``).
+        # The currency_registry uppercases everything on load, so undo
+        # that here for token_id=0.
+        if token_id == 0 and isinstance(symbol, str):
+            symbol = symbol.lower()
         return {
             "currency": chain,
             "issuer": rec.get("issuer"),
             "name": rec.get("name") or chain,
-            "symbol": rec.get("symbol") or chain,
+            "symbol": symbol,
             "token_id": token_id,
             "unit": rec.get("unit", 6),
         }
@@ -130,8 +141,15 @@ def _normalize_chain(chain: str) -> str:
         return "trx"
     if c in {"ethereum", "eth"}:
         return "eth"
+    # Chain code is "bsc" everywhere else in the codebase
+    # (models.py, base_tracer._normalize_chain, currency_registry).
+    # ``bnb`` is the native asset *symbol* on BSC, not a chain code —
+    # mapping the chain to "bnb" here breaks the (chain, token_id)
+    # lookup against currencies.json (which keys BSC tokens under
+    # "bsc"), so the frontend ends up with "currency: bnb",
+    # symbol="bnb", unit=6 for USDT, etc.
     if c in {"binance", "bsc", "bnb", "bep20"}:
-        return "bnb"
+        return "bsc"
     return c
 
 def _normalize_tx_descriptor(desc: str, chain: str, token_id: int | None) -> str:
@@ -331,9 +349,17 @@ def _compute_positions(
     return positions
 
 def _get_token_id(asset: str, chain: str) -> int:
-    """
-    Generate a deterministic token ID for the asset.
-    Returns 0 for native assets, and a hash-based ID for tokens.
+    """Resolve a deterministic on-chain token_id for ``(chain, asset)``.
+
+    Order: native-symbol shortcut → currencies.json registry lookup → 0.
+
+    Used as a fallback when ``token_id_map`` (built from the supplied
+    ``tx_list`` / ``txs``) doesn't have the (chain, asset) pair. The
+    previous implementation used Python's randomized ``hash()`` to
+    fabricate an ID in [1, 1000], which produced non-deterministic IDs
+    like ``431`` on every run and never matched the platform's
+    canonical token_ids (e.g. BSC USDT = 9). Returning 0 on miss keeps
+    the descriptor lane stable instead of inventing a phantom token.
     """
     if not asset:
         return 0
@@ -341,14 +367,25 @@ def _get_token_id(asset: str, chain: str) -> int:
     asset_upper = asset.upper()
     chain_upper = chain.upper()
 
-    if asset_upper == chain_upper or asset_upper in ["ETH", "BTC", "TRX", "SOL", "MATIC", "BNB"]:
-         return 0
+    # Native asset symbols on common chains.
+    if asset_upper == chain_upper or asset_upper in {
+        "ETH", "BTC", "TRX", "SOL", "MATIC", "BNB"
+    }:
+        return 0
 
-    # Common known tokens adjustments
-    if chain_upper == "TRX" and asset_upper == "USDT":
-        return 9
+    # Look up the canonical token_id from the seeded currency registry.
+    # This handles BSC USDT (token_id=9), ETH USDT (token_id=94252),
+    # TRX USDT (token_id=9), and every other token we ship a record for
+    # — without depending on a non-deterministic Python hash.
+    try:
+        from .currency_registry import get_registry
+        rec = get_registry().lookup_by_symbol(chain, asset_upper)
+        if rec is not None:
+            return rec.token_id
+    except Exception:  # noqa: BLE001 — registry must never break the viz
+        logger.debug("currency_registry lookup failed for (%s, %s)", chain, asset)
 
-    return abs(hash(f"{chain}:{asset}")) % 1000 + 1
+    return 0
 
 def generate_visualization_payload(
     trace_result: TraceResult,
@@ -768,6 +805,86 @@ def generate_visualization_payload(
     # Prepare for autoTxs: map address -> list of (step_index, type, hash, path)
     address_activity = defaultdict(list)
 
+    # Disambiguate tx midpoints in two overlapping failure modes:
+    #
+    #   (a) Multiple distinct txs share the same (source, target) pair.
+    #       Every such tx lands on ``(src+tgt)/2`` and the frontend
+    #       stacks the amount labels on top of each other ("10k USDT)SDT"
+    #       in the rendered graph) while drawing every edge over the
+    #       same straight line.
+    #
+    #   (b) Completely unrelated pairs happen to share a midpoint. The
+    #       layout places addresses on a regular X/Y grid, so two pairs
+    #       whose src-columns and tgt-columns match AND whose y-averages
+    #       coincide produce overlapping tx-nodes even though the
+    #       endpoints differ (e.g. THWY8p→TC3rAMtu and TLdbvt→TYE5mN
+    #       both collapse onto ``(2352, 496.25)`` in the TRX case).
+    #
+    # A single collision map keyed on the rounded midpoint coordinate
+    # handles both cases: each tx that lands on an already-occupied
+    # coordinate fans out ``±_TX_COLLISION_STEP_PX`` along Y in an
+    # alternating pattern until a free slot is found.
+    #
+    # The step is wider than a label's rendered height (amount chips are
+    # roughly 28–34px tall in the frontend, so 68px keeps two stacked
+    # labels clearly separated with breathing room). The collision map
+    # is checked against BOTH the raw midpoint and each candidate offset
+    # position — this keeps a single overcrowded column from walking all
+    # of its offset siblings into one neighbour's slot.
+    _TX_COLLISION_STEP_PX = 68
+    _tx_slot_taken: set[tuple[float, float]] = set()
+
+    # Operators frequently turn on the platform's "merged tx mode" to
+    # collapse repeated transactions between the same pair of addresses
+    # into one fat edge. The expected payload shape:
+    #
+    #   * one ``mergedEdge`` entry in ``connects`` per unique (from, to)
+    #     pair, with ``id="{from}-{to}"`` and address-descriptors as
+    #     source/target;
+    #   * one ``mergedTx`` entry in ``txs`` per unique pair, with
+    #     ``descriptor=hash="{from}{to}"`` (no chain suffix, just the
+    #     concatenated address pair);
+    #   * each individual ``txEth``/``tx`` entry carries a
+    #     ``parentNode="{from}{to}"`` linking it to the hub.
+    #
+    # When the frontend sees ``helpers.isMergedTxMode = true`` it hides
+    # the per-tx connectors and shows the consolidated mergedEdge
+    # instead. Multiple txs between the same pair (e.g. four
+    # TLHPDaLrq → TN6cEuxV transfers) collapse into a single visual
+    # arrow with a tx-count badge.
+    edge_pairs: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _resolve_tx_position(mid_x: float, mid_y: float) -> tuple[float, float]:
+        """Return an unclaimed ``(x, y)`` near ``(mid_x, mid_y)``.
+
+        The first caller on a given midpoint gets it verbatim; each
+        subsequent caller tries ``±68``, ``±136``, … along Y until an
+        empty slot is found. Slots are tracked in ``_tx_slot_taken`` so
+        a later collision at a neighbouring pair can't silently land on
+        an already-shifted sibling of ours.
+        """
+        # Round to 1-px bins so float noise doesn't hide a collision.
+        base_x = round(mid_x, 1)
+        base_y = round(mid_y, 1)
+        if (base_x, base_y) not in _tx_slot_taken:
+            _tx_slot_taken.add((base_x, base_y))
+            return mid_x, mid_y
+        # Walk outward: +68, -68, +136, -136, …
+        step = _TX_COLLISION_STEP_PX
+        rank = 1
+        while True:
+            for sign in (1, -1):
+                candidate = (base_x, round(base_y + sign * rank * step, 1))
+                if candidate not in _tx_slot_taken:
+                    _tx_slot_taken.add(candidate)
+                    return mid_x, mid_y + sign * rank * step
+            rank += 1
+            if rank > 40:
+                # Runaway guard — 40 rank × 68px = 2720px vertical span.
+                # Any real graph that outgrows this has bigger issues
+                # than overlap; give up and reuse the midpoint.
+                return mid_x, mid_y
+
     for i_step, step in enumerate(all_steps):
         chain = _normalize_chain(step.chain)
         asset = (step.asset or "").upper()
@@ -822,11 +939,31 @@ def generate_visualization_payload(
 
         mid_x = (src_pos["x"] + tgt_pos["x"]) / 2
         mid_y = (src_pos["y"] + tgt_pos["y"]) / 2
+        # Displace the tx node off any midpoint another tx has already
+        # claimed. Catches both same-pair repeats (b36a + 376c both on
+        # TLHPDaL→TN6c) and reverse-direction collisions (TN6c→TLHPDaL
+        # shares the same midpoint as TLHPDaL→TN6c when both endpoints
+        # sit on the same Y row) plus accidental cross-pair hits where
+        # unrelated src/tgt pairs happen to average to the same point.
+        mid_x, mid_y = _resolve_tx_position(mid_x, mid_y)
 
         _UTXO_CHAINS = {"btc", "bch", "ltc"}
         is_utxo = chain in _UTXO_CHAINS
         tx_type = "tx" if is_utxo else "txEth"
         tx_path = None if is_utxo else "0"
+
+        # Track this (from, to) pair for the merged-tx pass below.
+        # The first step on a pair locks in the src/tgt descriptors and
+        # color; subsequent steps on the same pair (multi-tx between
+        # the same two addresses) all collapse into the same hub.
+        pair_key = (step.from_address, step.to_address)
+        if pair_key not in edge_pairs:
+            edge_pairs[pair_key] = {
+                "src_desc": src_desc,
+                "tgt_desc": tgt_desc,
+                "color": edge_color,
+            }
+        parent_descriptor = f"{step.from_address}{step.to_address}"
 
         if tx_desc not in tx_desc_seen:
             txs_output.append({
@@ -838,7 +975,8 @@ def generate_visualization_payload(
                 "y": mid_y,
                 "color": edge_color,
                 "path": tx_path,
-                "type": tx_type
+                "type": tx_type,
+                "parentNode": parent_descriptor,
             })
             tx_desc_seen.add(tx_desc)
 
@@ -1007,6 +1145,44 @@ def generate_visualization_payload(
                 token_id=edge_token_id,
                 asset_hint=(step.asset or "").upper(),
             )
+
+    # --- Merged-edge / merged-tx hubs (one per (from, to) pair) ---
+    # Operators turn on the platform's "merged tx mode" to collapse
+    # repeated transfers between the same pair of addresses into one
+    # fat arrow with a count badge — this is what the human-built
+    # graphs showed for ``TLHPDaLrq → TN6cEuxV`` (4 transfers
+    # collapsing into a single visual edge with 30k/220k/etc. amounts
+    # listed inside).
+    #
+    # We emit one ``mergedEdge`` connect (id="{from}-{to}",
+    # source/target = address-descriptors) and one ``mergedTx`` item
+    # (descriptor=hash="{from}{to}", input/output) per unique pair.
+    # Every individual ``txEth``/``tx`` already carries
+    # ``parentNode="{from}{to}"`` from the loop above, so the frontend
+    # can group them under the hub when the toggle is on.
+    for (from_addr, to_addr), info in edge_pairs.items():
+        pair_id = f"{from_addr}-{to_addr}"
+        parent_descriptor = f"{from_addr}{to_addr}"
+        connects.append({
+            "id": pair_id,
+            "type": "mergedEdge",
+            "source": info["src_desc"],
+            "target": info["tgt_desc"],
+            "data": {
+                "input": from_addr,
+                "output": to_addr,
+                "color": info["color"],
+            },
+        })
+        txs_output.append({
+            "descriptor": parent_descriptor,
+            "hash": parent_descriptor,
+            "input": from_addr,
+            "output": to_addr,
+            "x": 0,
+            "y": 0,
+            "type": "mergedTx",
+        })
 
     # --- Cross-chain bridge handoff connectors ---
     # For each ``bridge_transfer`` step, the tracer emits the step on the
@@ -1298,7 +1474,13 @@ def generate_visualization_payload(
 
     helpers = {
         "isConnectionBasedMode": False,
-        "isMergedTxMode": False,
+        # Always emit merged structures (per-pair mergedEdge + mergedTx
+        # hubs are built unconditionally above), and flag the payload
+        # so the frontend can pick the consolidated view by default.
+        # Operators can still toggle back to the expanded per-tx view —
+        # the individual ``txEth``/``tx`` connectors stay in ``connects``
+        # untouched.
+        "isMergedTxMode": bool(edge_pairs),
         "isFiatMode": False,
         "isShowDate": False,
         "isHelperLinesDisabled": False,

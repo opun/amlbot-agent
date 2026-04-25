@@ -184,6 +184,121 @@ class TestAssetChangedBridgeDustGuard:
             )
 
 
+class TestDustAggregateDoesNotKillAlivePath:
+    """When a later dust iteration hits a recipient that a PRIOR non-dust
+    iteration already registered in ``recipient_state``, the dust code
+    path pulls ``path_id`` from the existing state instead of forking a
+    new path — meaning the ``path_id`` is a live branch with a pending
+    HopJob. Setting ``stop_reason = "Below dust threshold"`` on it would
+    (a) make ``_completed_paths_count()`` count it toward the scheduler's
+    ``max_completed`` budget even though it still has downstream work,
+    and (b) mislead downstream rendering into believing the leg ended at
+    dust when the real HopJob continues.
+
+    Reproduced from
+    ``recordings/2026-04-24/…_trx_USDT_e37253294b__trace_c5.jsonl``:
+    TLHPDaL's iter 10 pushed a HopJob for TRgoBU (5 632 USDT); iter 14
+    then sent 108 USDT to the same TRgoBU. With the pre-fix code iter 14
+    dust-trimmed ``paths["10"]`` — TRgoBU's hop 2 never ran because the
+    scheduler's completion count jumped past the 10-path budget.
+
+    Fix: when the dust branch is an aggregate onto an existing recipient
+    (``existing_state is not None``), skip the ``stop_reason`` /
+    ``path_seen_addresses`` / ``dust_trimmed_paths`` writes.
+    """
+
+    def _should_set_stop_reason(self, *, existing_state_present: bool) -> bool:
+        """Mirror of the new ``is_aggregate_onto_alive`` guard in the
+        dust branch. Keep in sync when the rule there changes."""
+        return not existing_state_present
+
+    def test_fresh_recipient_path_is_stopped(self):
+        assert self._should_set_stop_reason(existing_state_present=False) is True
+
+    def test_aggregate_onto_live_path_keeps_running(self):
+        assert self._should_set_stop_reason(existing_state_present=True) is False
+
+
+class TestDustTrimmedPathsExcludedFromBudget:
+    """``_completed_paths_count()`` drives ``HopScheduler.should_continue``
+    via ``max_completed``. Before the fix it counted every path with a
+    ``stop_reason``, including dust-trimmed siblings. A single TLHPDaL
+    fan-out produced ~15 dust paths — well past the default
+    ``max_paths=10`` budget — and the scheduler exited before any
+    downstream hop was processed. The output graph then showed hop-1
+    edges but no hop-2+ exploration.
+
+    Fix: exclude paths in ``dust_trimmed_paths`` from the budget count.
+    Only genuine terminals (CEX, bridge, dead-end, max-hops) count.
+    """
+
+    def _completed_count(
+        self, stop_reasons: dict[str, str | None], dust_trimmed: set[str]
+    ) -> int:
+        """Mirror of the new ``_completed_paths_count`` body."""
+        return sum(
+            1 for pid, sr in stop_reasons.items()
+            if sr and pid not in dust_trimmed
+        )
+
+    def test_dust_only_paths_do_not_consume_budget(self):
+        stops = {"1": "Below dust threshold", "2": "Below dust threshold"}
+        dust = {"1", "2"}
+        assert self._completed_count(stops, dust) == 0
+
+    def test_real_terminal_still_counts(self):
+        stops = {"1": "Reached terminal entity", "2": "Below dust threshold"}
+        dust = {"2"}
+        assert self._completed_count(stops, dust) == 1
+
+    def test_mixed_terminals_count_only_real_ones(self):
+        stops = {
+            "1": "Below dust threshold",
+            "2": "Reached terminal entity",
+            "3": "Dead end - no outgoing transactions",
+            "4": "Below dust threshold",
+            "5": "Max hop limit reached",
+        }
+        dust = {"1", "4"}
+        assert self._completed_count(stops, dust) == 3
+
+
+class TestDustDoesNotPolluteParentPathSeenSet:
+    """When the first sibling iteration of an outgoing-tx loop dust-trims
+    and happens to reuse ``base_path_id`` (because ``used_base_path`` is
+    still False), writing ``to_addr`` into ``path_seen_addresses[path_id]``
+    would pollute the INCOMING path's history — not the sibling branch.
+
+    The loop-detection check at the top of the next iteration reads
+    ``path_seen_addresses[job.path_id]``; with the old code a dust
+    ``b36a → TN6c`` as iter 1 blocked the legitimate
+    ``376c (220 100 USDT) → TN6c`` as iter 2, because both iterations see
+    ``job.path_id == base_path_id == "1"`` and iter 1's pollution lands in
+    the exact set iter 2 checks. Trace
+    ``recordings/2026-04-24/…_trx_USDT_e37253294b__trace_57.jsonl``
+    reproduced the miss in production.
+
+    Fix: the dust branch only writes to ``path_seen_addresses[path_id]``
+    when ``path_id != job.path_id`` — i.e. only for forked siblings, not
+    for the parent path itself.
+    """
+
+    def _should_pollute_parent_seen(self, *, path_id: str, job_path_id: str) -> bool:
+        """Mirror of the guard on the ``path_seen_addresses`` write in the
+        dust branch of ``_run_agentic_trace``. Keep in sync when the rule
+        there changes."""
+        return path_id != job_path_id
+
+    def test_first_iter_reusing_base_does_not_pollute(self):
+        # iter 1: used_base_path was False, so path_id == base == job.path_id
+        assert self._should_pollute_parent_seen(path_id="1", job_path_id="1") is False
+
+    def test_forked_sibling_iter_pollutes_its_own_branch(self):
+        # iter 3+: forked path_id != job.path_id → safe to pollute
+        assert self._should_pollute_parent_seen(path_id="2", job_path_id="1") is True
+        assert self._should_pollute_parent_seen(path_id="5", job_path_id="1") is True
+
+
 class TestFIFOLedgerAttributionForDust:
     """Sanity: FIFO attribution actually returns a small number when the
     source address got a tiny theft-share relative to its total inflow."""

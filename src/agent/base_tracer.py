@@ -40,6 +40,7 @@ from .theft_detection import (
     infer_approx_date_from_description,
     infer_asset_symbol,
 )
+from .tool_dispatch import BRIDGE_ANALYZER_MODEL
 from .trace_postprocess import postprocess_trace_result
 from .visualization import generate_visualization_payload
 
@@ -383,10 +384,14 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Bridge analyzer model id (e.g. bridge-analyzer-1)",
+                    },
                     "chain": {"type": "string", "description": "Source chain"},
                     "tx_hash": {"type": "string", "description": "Transaction HASH"}
                 },
-                "required": ["chain", "tx_hash"]
+                "required": ["model", "chain", "tx_hash"]
             }
         }
     },
@@ -770,12 +775,37 @@ class BaseTracer(ABC):
         all_txs_map: dict[str, dict[str, Any]],
         asset: str | None = None,
     ) -> float:
+        """Resolve a step's display amount, preferring ``amount_coerced``
+        from ``all_txs`` (already in display units) over the raw on-chain
+        ``amount``.
+
+        Why ``amount_coerced`` is treated as display and NOT pushed
+        through ``_normalize_amount``: the API contract is that
+        ``amount_coerced`` is the human-readable per-token amount (e.g.
+        ``0.14`` ETH, ``1080200`` USDT). ``_normalize_amount`` has a
+        safeguard ``10 ** max(unit // 2, 6)`` to detect "is this raw or
+        display?", but the threshold is exactly ``10**6`` for low-unit
+        tokens (USDT/USDC unit=6). A real-world 1.08M USDT step has
+        display value ``1.08e6`` which equals the safeguard, gets
+        wrongly classified as "raw", and is divided again to ``1.08``.
+        Downstream dust filters then trim the hop as 0.0001% of the
+        stolen amount and the trace stops one hop early.
+
+        For ``amount`` (raw on-chain), we still call
+        ``_normalize_amount`` because that path comes from
+        ``token_transfers`` and is genuinely in base units.
+        """
         if tx_hash and tx_hash in all_txs_map:
-            amt = all_txs_map[tx_hash].get("amount_coerced")
-            if amt is None:
-                amt = all_txs_map[tx_hash].get("amount")
-            if amt is not None:
-                return self._normalize_amount(amt, chain, asset)
+            row = all_txs_map[tx_hash]
+            amt_coerced = row.get("amount_coerced")
+            if amt_coerced is not None:
+                try:
+                    return float(amt_coerced)
+                except (TypeError, ValueError):
+                    pass
+            amt_raw = row.get("amount")
+            if amt_raw is not None:
+                return self._normalize_amount(amt_raw, chain, asset)
         return self._normalize_amount(amount, chain, asset)
 
     @staticmethod
@@ -812,6 +842,12 @@ class BaseTracer(ABC):
         "wormhole", "synapse", "hop", "multichain", "across", "router",
         "symbiosis", "mayan", "cbridge", "celer", "debridge", "squid",
         "connext", "orbiter", "thorchain", "rango", "rubic",
+        # NEAR Intents / NEAR Omni Bridge / NEAR One — same protocol under
+        # multiple display names. The internal aggregator address comes
+        # tagged as ``"NEAR Intents Treasury"`` (type=other, no subtype),
+        # so the brand-name fallback is the only path that catches it.
+        "near intent", "near intents", "near-intent", "near-intents",
+        "near omni", "near-omni", "near one", "near-one",
     })
 
     @classmethod
@@ -926,6 +962,94 @@ class BaseTracer(ABC):
                 "role": "unidentified_service", "terminal": True,
                 "service_label": identity, "protocol": None,
             }
+        return None
+
+    @classmethod
+    def _owner_matches_bridge_brand(cls, owner: Any) -> str | None:
+        """Return the matched brand keyword if ``owner`` (an API owner
+        block — ``{"name": …, "slug": …}``) lines up with one of the
+        ``_BRIDGE_BRAND_NAMES`` entries, otherwise ``None``.
+
+        Used both by the structural classifier (tagging an address that
+        IS the bridge contract) and by the deposit-detection heuristic
+        (tagging an address that SENDS to a bridge).
+        """
+        if not isinstance(owner, dict):
+            return None
+        name = str(owner.get("name") or "").lower()
+        slug = str(owner.get("slug") or "").lower()
+        if not name and not slug:
+            return None
+        for brand in cls._BRIDGE_BRAND_NAMES:
+            if brand in name or brand in slug:
+                return brand
+        return None
+
+    def _detect_bridge_deposit_pattern(
+        self,
+        data_list: list[dict[str, Any]],
+        threshold: float = 0.7,
+    ) -> dict[str, Any] | None:
+        """Detect the "per-swap deposit address forwards to a bridge
+        treasury" pattern.
+
+        Some bridges (NEAR Intents, NEAR Omni, …) issue a fresh deposit
+        address per cross-chain order; the deposit then forwards funds
+        to a stable internal aggregator that DOES carry an owner tag
+        (e.g. ``"NEAR Intents Treasury"``). The deposit itself has no
+        tag at all, so the structural classifier sees a plain
+        intermediate address and the trace would naively follow the
+        deposit→treasury hop and dead-end inside the bridge's internal
+        plumbing instead of crossing chains.
+
+        Heuristic: when the dominant share of an address's outflow
+        volume terminates at a known bridge brand (``threshold``
+        defaults to 70%), the address itself is acting as that bridge's
+        deposit-side. The cross-chain bridge tx of interest is then the
+        FUNDING tx of this deposit (i.e. the tx that put us on this
+        address), not the deposit→treasury tx that we just observed.
+
+        Returns the bridge-brand owner dict if the pattern matches,
+        otherwise ``None``. The caller is expected to (a) reclassify
+        the current address as ``bridge_service``, (b) re-run
+        ``bridge_analyze`` on its ``incoming_tx_hash`` to surface a
+        cross-chain destination, and (c) suppress the ``HopJob`` that
+        would have been pushed for the internal aggregator.
+        """
+        if not data_list:
+            return None
+        total_volume = 0.0
+        by_brand: dict[str, dict[str, Any]] = {}
+        for tx in data_list[:50]:
+            amt = tx.get("amount_coerced")
+            if amt is None:
+                amt = tx.get("amount")
+            try:
+                volume = float(amt or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if volume <= 0:
+                continue
+            total_volume += volume
+            owner: Any = None
+            cps = tx.get("counterparty")
+            if isinstance(cps, list) and cps and isinstance(cps[0], dict):
+                owner = cps[0]
+            if owner is None:
+                owner = tx.get("output_owner") or tx.get("owner")
+            brand = self._owner_matches_bridge_brand(owner)
+            if not brand:
+                continue
+            entry = by_brand.setdefault(brand, {"vol": 0.0, "owner": owner})
+            entry["vol"] += volume
+            # Prefer the owner block carrying the most metadata.
+            if isinstance(owner, dict) and len(owner) > len(entry["owner"] or {}):
+                entry["owner"] = owner
+        if total_volume <= 0:
+            return None
+        for entry in by_brand.values():
+            if entry["vol"] / total_volume >= threshold:
+                return entry["owner"]
         return None
 
     def _heuristic_classify(self, owner: Any, services: Any, owner_hint: Any = None) -> dict[str, Any]:
@@ -1198,6 +1322,12 @@ class BaseTracer(ABC):
 
         return result
 
+    # Any single outflow ≥ MIXED_FUNDS_RATIO × incoming is a strong signal
+    # the address holds pre-existing, non-theft balance that's exiting in
+    # the same chronological window. Greedy accumulation would stop after
+    # that one tx and miss the staged theft outflows that follow.
+    _MIXED_FUNDS_RATIO: float = 1.2
+
     def _accumulate_hashes(
         self,
         txs: list[dict[str, Any]],
@@ -1205,6 +1335,8 @@ class BaseTracer(ABC):
         chain: str,
         asset: str | None = None,
         max_select: int = 25,
+        *,
+        hop_index: int | None = None,
     ) -> list[str]:
         """Chronological accumulation per trace_orchestrator.md.
 
@@ -1216,6 +1348,28 @@ class BaseTracer(ABC):
         perpetrator splits funds into one big cluster plus a smaller tail
         (e.g. CEX deposits + a side transfer to a secondary mule address),
         which then cascades into missing downstream hops.
+
+        Mixed-funds safeguard — **hop-1 only**: when any single outflow
+        alone is ``≥ _MIXED_FUNDS_RATIO × incoming`` AND we're still at
+        the first hop, the "first to cross incoming" break is suppressed
+        for the rest of the loop. The address almost certainly held
+        pre-existing balance mixed with the theft inflow (e.g. a
+        long-lived mule that already had ~100k USDT when 105k of stolen
+        funds arrived, then wired 220k out in one shot before staging
+        the actual theft share across many smaller sends). We widen
+        selection to ``max_select`` and let ``max_paths`` downstream cap
+        the fan-out.
+
+        Hop-2+ is gated because by then ``incoming_amount`` is already
+        the FIFO-narrowed theft share, and a single covering outflow is
+        almost certainly THE continuation — not a mixed-balance payout.
+        Without the gate we saw a 60.60k USDT inflow followed by 300k /
+        121k / 58k siblings at hop 2, cluttering the graph with outflows
+        that clearly carry the recipient's own balance (see
+        ``recordings/2026-04-24/…_trx_USDT_e37253294b__trace_c2.jsonl``).
+        ``hop_index=None`` keeps the legacy "activate unconditionally"
+        behavior for callers that don't know their hop depth (eg. seed
+        expansion from a victim address before hop 1 formally starts).
         """
         if not txs:
             return []
@@ -1225,7 +1379,17 @@ class BaseTracer(ABC):
 
         accumulated = 0.0
         incoming = float(incoming_amount)
+        mixed_funds_threshold = incoming * self._MIXED_FUNDS_RATIO
+        mixed_funds_enabled = hop_index is None or hop_index <= 1
+        mixed_funds_detected = False
+        # On hop_index >= 2, skip individual outflows that alone exceed
+        # ``MIXED_FUNDS_RATIO × incoming`` — they almost certainly carry
+        # the recipient's own balance rather than propagated theft. We
+        # still need to pick SOMETHING though, so the first filtered tx
+        # acts as a fallback when every candidate is oversized.
+        oversized_skip_enabled = not mixed_funds_enabled
         selected: list[str] = []
+        skipped_oversized: list[str] = []
 
         for item in txs:
             tx_hash = item.get("hash") or item.get("tx_hash")
@@ -1235,13 +1399,34 @@ class BaseTracer(ABC):
             if amount_val is None:
                 amount_val = item.get("amount")
             amount_norm = self._normalize_amount(amount_val or 0.0, chain, asset)
+
+            if (
+                oversized_skip_enabled
+                and amount_norm >= mixed_funds_threshold
+            ):
+                # Remember the first oversized tx as a safety net for the
+                # "every candidate is oversized" corner case, but don't
+                # let it contaminate the normal accumulation.
+                if not skipped_oversized:
+                    skipped_oversized.append(tx_hash)
+                continue
+
             accumulated += amount_norm
             selected.append(tx_hash)
 
-            if accumulated >= incoming:
+            if mixed_funds_enabled and amount_norm >= mixed_funds_threshold:
+                mixed_funds_detected = True
+
+            if not mixed_funds_detected and accumulated >= incoming:
                 break
             if len(selected) >= max_select:
                 break
+
+        # Safety net: if we filtered everything, surface the earliest
+        # oversized tx so the trace doesn't silently dead-end. Better a
+        # noisy branch than a missing one.
+        if not selected and skipped_oversized:
+            selected.append(skipped_oversized[0])
 
         return selected
 
@@ -1456,7 +1641,10 @@ class BaseTracer(ABC):
                         )
                     return result
                 except TimeoutError:
-                    logger.error(f"❌ Tool timeout: {tool_name} (limit={timeout}s)")
+                    logger.error(
+                        "❌ Tool timeout: %s (limit=%ss) | args=%s",
+                        tool_name, timeout, tool_input,
+                    )
                     try:
                         tool_span.set_error({"message": "tool_timeout", "data": {"tool": tool_name}})
                         tool_span.span_data.output = {"error": "tool_timeout", "tool": tool_name}
@@ -1470,9 +1658,34 @@ class BaseTracer(ABC):
                         )
                     return {"error": "tool_timeout", "tool": tool_name}
                 except Exception as e:
-                    logger.error(f"❌ Tool error: {e}")
+                    # Surface the FULL context for diagnosing 5xx from
+                    # upstream MCP tools (bridge-analyze, etc.) — tool
+                    # name, the exact arguments we sent, the exception
+                    # type, and any response body attached by
+                    # ``mcp_http_client`` via ``exc.response_body``.
+                    resp_body = getattr(e, "response_body", None)
+                    resp_status = getattr(e, "response_status", None)
+                    logger.error(
+                        "❌ Tool error: tool=%s err_type=%s err=%s | args=%s"
+                        "%s%s",
+                        tool_name,
+                        type(e).__name__,
+                        e,
+                        tool_input,
+                        f" | http_status={resp_status}" if resp_status is not None else "",
+                        f" | response_body={resp_body!r}" if resp_body is not None else "",
+                    )
                     try:
-                        tool_span.set_error({"message": str(e), "data": {"tool": tool_name}})
+                        tool_span.set_error({
+                            "message": str(e),
+                            "data": {
+                                "tool": tool_name,
+                                "arguments": arguments,
+                                "err_type": type(e).__name__,
+                                "http_status": resp_status,
+                                "response_body": resp_body,
+                            },
+                        })
                         tool_span.span_data.output = {"error": str(e), "tool": tool_name}
                     except Exception:
                         pass
@@ -2515,7 +2728,17 @@ class BaseTracer(ABC):
             raise RuntimeError("victim_address or tx_hash is required")
 
         def _completed_paths_count() -> int:
-            return sum(1 for p in paths.values() if p.get("stop_reason"))
+            # Dust-trimmed branches are noise stops (sibling below the
+            # attribution threshold), not real terminals. Counting them
+            # toward the ``max_completed`` budget in HopScheduler starves
+            # the live HopJobs: a single fan-out of 25 outflows can
+            # produce 10+ dust siblings on hop 1 alone, tripping the
+            # scheduler's stop condition before any hop-2 work executes.
+            # Only count paths that reached a genuine endpoint.
+            return sum(
+                1 for p in paths.values()
+                if p.get("stop_reason") and p.get("path_id") not in dust_trimmed_paths
+            )
 
         async def _agentic_phase1_for_job(job_local: HopJob):
             _coros_pf: list = [
@@ -2531,6 +2754,7 @@ class BaseTracer(ABC):
             _eb_pf = bool(job_local.incoming_tx_hash and job_local.hop_index <= 3)
             if _eb_pf:
                 _coros_pf.append(_call_tool("bridge_analyze", {
+                    "model": BRIDGE_ANALYZER_MODEL,
                     "chain": job_local.chain,
                     "tx_hash": job_local.incoming_tx_hash,
                 }))
@@ -2661,6 +2885,7 @@ class BaseTracer(ABC):
                     bridge_info = _parse_bridge_info(_early_bridge_result)
                 elif bridge_candidate:
                     bridge_result = await _call_tool("bridge_analyze", {
+                        "model": BRIDGE_ANALYZER_MODEL,
                         "chain": job.chain,
                         "tx_hash": job.incoming_tx_hash,
                     })
@@ -2992,6 +3217,214 @@ class BaseTracer(ABC):
                 logger.info("Path %s stopped at %s (hop %d): dead end — no outgoing txs", job.path_id, self._format_address(job.current_address), job.hop_index)
                 return
 
+            # --- Bridge-deposit detection (NEAR Intents / similar) ---
+            # Per-swap deposit addresses (NEAR Intents) forward funds
+            # into a stable bridge-owned aggregator. The aggregator is
+            # what carries the brand tag in the API; the deposit itself
+            # looks like a plain intermediate. Without this check the
+            # trace would follow the deposit→aggregator hop and stop
+            # inside the bridge's internal plumbing instead of crossing
+            # chains.
+            #
+            # The detection is only a *signal* — we re-run
+            # ``bridge_analyze`` on the FUNDING tx to confirm. Two
+            # outcomes:
+            #
+            #   1. ``is_bridge=true`` — genuine per-swap deposit
+            #      (the deposit address is bridge-managed, so the
+            #      bridge tx IS the funding tx). Reclassify as
+            #      ``bridge_service`` and follow the destination.
+            #
+            #   2. ``is_bridge=false`` — the current address is an
+            #      ordinary user wallet that just happens to forward
+            #      funds to a bridge service (Bridgers etc.). The
+            #      bridge tx is the OUTGOING tx to the bridge contract,
+            #      not the incoming tx. Fall through silently to
+            #      normal outflow processing — the existing bridge
+            #      handler at ``_agentic_hop_after_phase1`` line 2768
+            #      will pick up the bridge contract on the next hop
+            #      via ``bridge_analyze`` against the outgoing tx.
+            #
+            # We therefore DO NOT clobber ``role``, ``terminal``,
+            # ``labels`` or the entity until the bridge_analyze
+            # confirmation is in.
+            if not terminal and job.incoming_tx_hash:
+                deposit_brand_owner = self._detect_bridge_deposit_pattern(data_list)
+                if deposit_brand_owner:
+                    brand_label = (
+                        deposit_brand_owner.get("name")
+                        or deposit_brand_owner.get("slug")
+                        or "Bridge"
+                    )
+                    logger.info(
+                        "Bridge-deposit pattern at %s (hop %d): outflows aggregate to %r; "
+                        "re-running bridge_analyze on incoming tx %s",
+                        self._format_address(job.current_address), job.hop_index,
+                        brand_label,
+                        (job.incoming_tx_hash or "")[:16],
+                    )
+
+                    late_bridge_result = await _call_tool("bridge_analyze", {
+                        "model": BRIDGE_ANALYZER_MODEL,
+                        "chain": job.chain,
+                        "tx_hash": job.incoming_tx_hash,
+                    })
+                    late_bridge_info = _parse_bridge_info(late_bridge_result)
+
+                    if late_bridge_info and late_bridge_info.get("is_bridge"):
+                        # CONFIRMED bridge deposit — now we can
+                        # safely reclassify and follow the destination
+                        # (or annotate destination-unknown).
+                        role = "bridge_service"
+                        terminal = True
+                        if "Bridge" not in labels:
+                            labels.append("Bridge")
+                        if brand_label and brand_label not in labels:
+                            labels.append(str(brand_label))
+                        if not classification.get("service_label"):
+                            classification["service_label"] = brand_label
+                        _ensure_entity(
+                            job.current_address, role, risk_score,
+                            labels=labels, notes=notes,
+                        )
+
+                        dst_chain_raw = late_bridge_info.get("dst_chain")
+                        dst_address = late_bridge_info.get("dst_address")
+                        if dst_chain_raw and dst_address:
+                            dst_chain_norm = self._normalize_chain(dst_chain_raw)
+                            new_asset = (
+                                (late_bridge_info.get("dst_asset") or job.asset or "").upper()
+                                or job.asset
+                            )
+                            asset_changed = bool(
+                                late_bridge_info.get("dst_asset")
+                            ) and new_asset != (job.asset or "").upper()
+                            to_amount_api = late_bridge_info.get("to_amount")
+                            from_amount_api = late_bridge_info.get("from_amount")
+                            if to_amount_api is not None:
+                                bridge_amount = self._normalize_amount(
+                                    to_amount_api, dst_chain_norm, new_asset,
+                                )
+                            elif not asset_changed:
+                                raw = (
+                                    from_amount_api if from_amount_api is not None
+                                    else (job.incoming_amount or 0.0)
+                                )
+                                bridge_amount = self._normalize_amount(
+                                    raw, dst_chain_norm, new_asset,
+                                )
+                            else:
+                                # Asset swapped and no destination amount
+                                # provided — fall back to the source
+                                # incoming amount as a coarse approximation;
+                                # the destination-side HopJob will refine
+                                # via its own outflow walk.
+                                bridge_amount = float(job.incoming_amount or 0.0)
+
+                            dst_tx_hash = late_bridge_info.get("dst_tx_hash")
+                            dst_block_time = late_bridge_info.get("dst_block_time")
+                            synthetic_dst_hash = dst_tx_hash or f"bridge-{uuid.uuid4().hex[:16]}"
+
+                            _ensure_entity(
+                                dst_address, "intermediate", 0.0,
+                                notes=f"{brand_label} cross-chain destination",
+                            )
+
+                            step_index_b = len(paths[job.path_id]["steps"])
+                            bridge_attr = (
+                                bridge_amount if asset_changed
+                                else fifo_ledger.attribute_outflow(
+                                    job.current_address, bridge_amount,
+                                )
+                            )
+                            fifo_ledger.record_inflow(
+                                dst_address, bridge_amount, bridge_attr,
+                            )
+                            _add_step(job.path_id, {
+                                "step_index": step_index_b,
+                                "from": job.current_address,
+                                "to": dst_address,
+                                "tx_hash": synthetic_dst_hash,
+                                "chain": dst_chain_norm,
+                                "asset": new_asset,
+                                "amount_estimate": bridge_amount,
+                                "attributed_amount": bridge_attr,
+                                "time": dst_block_time,
+                                "direction": "out",
+                                "step_type": "bridge_transfer",
+                                "service_label": brand_label,
+                                "protocol": late_bridge_info.get("protocol"),
+                                "reasoning": (
+                                    f"{brand_label} bridge deposit detected; "
+                                    f"continuing on {dst_chain_norm}."
+                                ),
+                                "llm_decisions": (
+                                    [classifier_decision.model_dump()]
+                                    if classifier_decision else []
+                                ),
+                            })
+
+                            new_token_id = int(
+                                late_bridge_info.get("dst_token_id") or 0
+                            )
+                            hop_scheduler.push(HopJob(
+                                path_id=job.path_id,
+                                current_address=dst_address,
+                                incoming_tx_hash=synthetic_dst_hash,
+                                incoming_amount=bridge_amount,
+                                incoming_time=(
+                                    int(dst_block_time)
+                                    if isinstance(dst_block_time, (int, float))
+                                    else job.incoming_time
+                                ),
+                                chain=dst_chain_norm,
+                                asset=new_asset,
+                                token_id=new_token_id,
+                                hop_index=job.hop_index + 1,
+                                attributed_amount=bridge_attr,
+                            ))
+                            return
+
+                        # Bridge confirmed but cross-chain destination
+                        # unresolved — annotate and stop the path so
+                        # we don't trace the bridge's internal ledger.
+                        annotations.append({
+                            "id": f"ann-{len(annotations)+1}",
+                            "label": f"{brand_label} - Destination Unknown",
+                            "related_addresses": [job.current_address],
+                            "related_steps": [
+                                f"{job.path_id}:{max(len(paths[job.path_id]['steps'])-1, 0)}"
+                            ],
+                            "text": (
+                                f"{brand_label} bridge deposit detected at "
+                                f"{self._format_address(job.current_address)}; "
+                                f"outflows aggregate into the {brand_label} "
+                                f"treasury but bridge_analyze did not return a "
+                                f"cross-chain destination. Manual investigation "
+                                f"of the destination chain is needed."
+                            ),
+                        })
+                        paths[job.path_id]["stop_reason"] = (
+                            f"{brand_label} bridge deposit — destination unknown"
+                        )
+                        fifo_ledger.claim_terminal(job.attributed_amount)
+                        return
+
+                    # ``is_bridge=false`` on the funding tx → this is
+                    # NOT a per-swap deposit, just an ordinary wallet
+                    # whose outflow happens to land on a bridge brand.
+                    # Fall through to normal outflow processing; the
+                    # existing handler will catch the bridge contract
+                    # at the next hop.
+                    logger.info(
+                        "Bridge-deposit signal at %s (hop %d) was not confirmed by "
+                        "bridge_analyze (is_bridge=false on incoming tx) — proceeding "
+                        "with normal outflow processing; the existing bridge handler "
+                        "will catch %r contract on the next hop.",
+                        self._format_address(job.current_address), job.hop_index,
+                        brand_label,
+                    )
+
             # --- OTC-like behavioral analysis (deferred, reuses data_list) ---
             if _run_otc:
                 cex_threshold = payload.get("cex_single_cluster_threshold", 0.60)
@@ -3086,7 +3519,10 @@ class BaseTracer(ABC):
 
             selector_result = None
             hop_selector_decision: DecisionRef | None = None
-            selected_hashes = self._accumulate_hashes(data_list, job.incoming_amount, job.chain, asset=job.asset)
+            selected_hashes = self._accumulate_hashes(
+                data_list, job.incoming_amount, job.chain, asset=job.asset,
+                hop_index=job.hop_index,
+            )
             used_accumulation = bool(selected_hashes)
             if not selected_hashes and data_list:
                 selector_context = {
@@ -3244,11 +3680,37 @@ class BaseTracer(ABC):
 
                 if dust_hit:
                     dust_pct = (raw_attributed / stolen_amount) * 100.0 if stolen_amount else 0.0
-                    paths[path_id]["stop_reason"] = (
-                        f"Below dust threshold ({dust_pct:.2f}% of stolen amount)"
-                    )
-                    path_seen_addresses.setdefault(path_id, set()).add(to_addr)
-                    if path_id not in dust_trimmed_paths:
+                    # Dust-aggregate onto an already-active path must NOT
+                    # mark that path "completed". When ``existing_state`` is
+                    # set the path_id was taken from a prior non-dust
+                    # sibling that pushed a real HopJob — the path still has
+                    # live downstream work. Setting ``stop_reason`` here
+                    # (a) inflates ``_completed_paths_count()`` and causes
+                    # the scheduler to exit before popping the pending
+                    # HopJob, and (b) misleads downstream renderers into
+                    # thinking the leg terminated at dust when it actually
+                    # continued. Record the dust annotation only.
+                    is_aggregate_onto_alive = existing_state is not None
+                    if not is_aggregate_onto_alive:
+                        paths[path_id]["stop_reason"] = (
+                            f"Below dust threshold ({dust_pct:.2f}% of stolen amount)"
+                        )
+                    # Only mark the recipient as seen on FORKED paths — not on
+                    # the incoming (base) path itself. When the first sibling
+                    # iteration reuses ``base_path_id`` (``used_base_path`` is
+                    # flipped only after that first iter), a naive
+                    # ``path_seen_addresses[path_id].add(to_addr)`` pollutes
+                    # the parent path's history. The loop-detection check at
+                    # the top of the loop (``to_addr in
+                    # path_seen_addresses[job.path_id]``) then blocks every
+                    # LATER sibling from going to the same recipient —
+                    # including the large legitimate outflow the dust
+                    # iteration happened to land on first (e.g. a 10 USDT
+                    # dust → TN6c followed by a 220 100 USDT real leg to
+                    # TN6c would silently drop the 220k).
+                    if path_id != job.path_id and not is_aggregate_onto_alive:
+                        path_seen_addresses.setdefault(path_id, set()).add(to_addr)
+                    if path_id not in dust_trimmed_paths and not is_aggregate_onto_alive:
                         annotations.append({
                             "id": f"ann-{len(annotations)+1}",
                             "label": "Dust Trimmed",
@@ -3965,7 +4427,11 @@ class BaseTracer(ABC):
         if not c:
             return c
         manual = {
+            # ``tron-mainnet`` is what we send to bridge-detector; it
+            # may echo the same string back in ``dst_chain``, so map
+            # both the short and the network-id form to ``trx``.
             "tron": "trx",
+            "tron-mainnet": "trx",
             "trc": "trx",
             "trc20": "trx",
             "trx": "trx",

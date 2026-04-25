@@ -6,6 +6,13 @@ eliminating duplicated if/elif chains.
 from enum import StrEnum
 from typing import Any
 
+# Model id for the upstream bridge-detector service. The API exposes
+# multiple analyzer versions ("bridge-analyzer-1", future "bridge-analyzer-2",
+# …); we pin to v1 so behavior stays stable as the server rolls out newer
+# models. Every ``bridge_analyze`` invocation includes this in the request
+# body — the bridge-detector treats it as a required parameter.
+BRIDGE_ANALYZER_MODEL = "bridge-analyzer-1"
+
 
 class ToolName(StrEnum):
     EXPERT_SEARCH = "expert_search"
@@ -105,10 +112,51 @@ async def _call_get_extra_address_info(client: Any, args: dict[str, Any]) -> Any
     )
 
 
+# bridge-detector API (https://api.bridge-detector.amlbot.com/docs) expects
+# full chain names like "tron" / "ethereum" / "binance-smart-chain", while the
+# rest of our codebase normalizes to SAILS short codes ("trx", "eth", "bsc").
+# Translate here — the stdio MCP server and the HTTP proxy both forward the
+# ``chain`` argument verbatim, so the short code hits the bridge backend and
+# is rejected with a 500. Mapping is narrow on purpose: only chains the
+# bridge-detector actually serves.
+_BRIDGE_CHAIN_MAP: dict[str, str] = {
+    # Tron is exposed to bridge-detector as ``tron-mainnet`` (the
+    # service's network identifier); plain ``"tron"`` is rejected.
+    "trx": "tron-mainnet",
+    "eth": "ethereum",
+    "bsc": "binance-smart-chain",
+    "bnb": "binance-smart-chain",
+    "matic": "polygon",
+    "arb": "arbitrum",
+    "op": "optimism",
+    "avax": "avalanche",
+    "base": "base",
+    "sol": "solana",
+    "btc": "bitcoin",
+}
+
+
+def _bridge_chain(chain: str | None) -> str:
+    if not chain:
+        return ""
+    normalized = chain.strip().lower()
+    return _BRIDGE_CHAIN_MAP.get(normalized, normalized)
+
+
 async def _call_bridge_analyze(client: Any, args: dict[str, Any]) -> Any:
+    # No chain translation here — both ``MCPClient.bridge_analyze`` and
+    # ``MCPHTTPClient.bridge_analyze`` apply ``_bridge_chain`` internally
+    # so the mapping is uniform regardless of call path (dispatch table
+    # vs direct ``client.bridge_analyze`` calls from ``api.py`` /
+    # ``deterministic_tracer.py``). Passing it here too would be a
+    # (harmless but confusing) no-op second application.
+    #
+    # ``model`` is plumbed through with a default so existing callers
+    # (which don't yet supply it) keep working.
     return await client.bridge_analyze(
         args["chain"],
         args["tx_hash"],
+        model=args.get("model") or BRIDGE_ANALYZER_MODEL,
     )
 
 

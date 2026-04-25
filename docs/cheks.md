@@ -2,6 +2,7 @@
 ⛓️ Blockchain: eth
 💰 Stolen Asset: ETH
 
+
 🔗 Transaction Hash: 0x0468197b6b99eb5ebd62d7bf8c880bf83c11be83f1974caa32d029c2316b290a
 ⛓️ Blockchain: eth
 💰 Stolen Asset: ETH
@@ -17,3 +18,15 @@
 🔗 Transaction Hash: e9cbc26edbd53c08e26a3a65fad670ab89ef218dff75930e856bb1aaf9450b9d
 ⛓️ Blockchain: btc
 💰 Stolen Asset: BTC
+
+🔗 Transaction Hash: e37253294b38d18d98981cb12576078991e10e56ca3b9dc65bb09c8c19998c07
+⛓️ Blockchain: trx
+💰 Stolen Asset: USDT
+
+🔗 Transaction Hash: 2e2e0822d7cf1dd3171c0da1acf0019ae2ed7c8fc03eebe6369dae2efa3cd093
+⛓️ Blockchain: trx
+💰 Stolen Asset: USDT
+
+🔗 Transaction Hash: 0xcdabe9f7f614fe2720693c03643d1a6f8d68cd0a3fa1bfeaf77996ca999718eb
+⛓️ Blockchain: bsc
+💰 Stolen Asset: USDT

@@ -2720,6 +2720,93 @@ class BaseTracer(ABC):
                 return fallback
             return fallback
 
+        async def _resolve_bridge_destination_transfer(
+            dst_chain: str,
+            dst_address: str,
+            dst_tx_hash: str | None,
+        ) -> dict[str, Any] | None:
+            """Best-effort reconcile bridge metadata with real destination tx data.
+
+            bridge_analyze can report destination symbol/amount fields that don't
+            match the actual destination tx leg (for example, ETH instead of USDT).
+            When we have ``dst_tx_hash``, prefer on-chain token_transfers for that
+            hash and choose the transfer that credits ``dst_address``.
+            """
+            if not dst_tx_hash or not dst_chain or not dst_address:
+                return None
+            try:
+                tr_resp = await _call_tool("token_transfers", {
+                    "tx_hash": dst_tx_hash,
+                    "blockchain_name": dst_chain,
+                })
+                transfers = tr_resp.get("data", []) if isinstance(tr_resp, dict) else []
+                if not isinstance(transfers, list) or not transfers:
+                    return None
+
+                dst_lc = str(dst_address).lower()
+
+                def _addr(block: Any) -> str:
+                    if isinstance(block, dict):
+                        return str(block.get("address") or "").lower()
+                    return ""
+
+                def _raw_amount(tr: dict[str, Any]) -> float:
+                    try:
+                        return float(tr.get("amount") or 0.0)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                incoming_to_dst: list[dict[str, Any]] = []
+                positive_any: list[dict[str, Any]] = []
+                for tr in transfers:
+                    if not isinstance(tr, dict):
+                        continue
+                    amt = _raw_amount(tr)
+                    if amt <= 0:
+                        continue
+                    positive_any.append(tr)
+                    if _addr(tr.get("output")) == dst_lc:
+                        incoming_to_dst.append(tr)
+
+                candidates = incoming_to_dst or positive_any
+                if not candidates:
+                    return None
+
+                transfer = max(candidates, key=_raw_amount)
+                try:
+                    token_id = int(transfer.get("token_id") or transfer.get("tokenId") or 0)
+                except (TypeError, ValueError):
+                    token_id = 0
+
+                rec = _get_currency_registry().lookup(dst_chain, token_id)
+                symbol = ((rec.symbol if rec else None) or "").upper()
+                rec_name = (rec.name if rec else None)
+                if self._is_wrapped_native(dst_chain, symbol, rec_name, token_id):
+                    symbol = self._native_symbol_for_chain(dst_chain)
+                    token_id = 0
+
+                amount_display = self._normalize_amount(
+                    transfer.get("amount") or 0.0,
+                    dst_chain,
+                    symbol,
+                )
+                bt = transfer.get("block_time") or transfer.get("pool_time")
+                return {
+                    "asset": symbol,
+                    "token_id": token_id,
+                    "amount": amount_display,
+                    "raw_amount": transfer.get("amount"),
+                    "block_time": int(bt) if bt is not None else None,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "Bridge destination transfer resolve failed for %s on %s: %s",
+                    (dst_tx_hash or "")[:18],
+                    dst_chain,
+                    exc,
+                )
+                return None
+
         # Seed path(s)
         if tx_hash:
             is_utxo_chain = chain in self._SATOSHI_CHAINS
@@ -3209,8 +3296,17 @@ class BaseTracer(ABC):
                     # ``dst_asset``, we switch on it; otherwise the
                     # trace continues on the same asset as before.
                     dst_asset_api = bridge_info.get("dst_asset")
-                    new_asset = (dst_asset_api or job.asset or "").upper() or job.asset
-                    asset_changed = bool(dst_asset_api) and new_asset != (job.asset or "").upper()
+                    observed_dst = await _resolve_bridge_destination_transfer(
+                        dst_chain=dst_chain_norm,
+                        dst_address=dst_address,
+                        dst_tx_hash=dst_tx_hash,
+                    )
+                    observed_asset = (observed_dst or {}).get("asset")
+                    if observed_asset:
+                        new_asset = str(observed_asset).upper()
+                    else:
+                        new_asset = (dst_asset_api or job.asset or "").upper() or job.asset
+                    asset_changed = new_asset != (job.asset or "").upper()
 
                     # Pick the raw amount to carry across the bridge.
                     # Cross-asset bridges: only ``to_amount`` is meaningful;
@@ -3219,7 +3315,12 @@ class BaseTracer(ABC):
                     matched_dst_tx_hash: str | None = None
                     matched_dst_block_time: int | None = None
                     dst_token_id_resolved: int | None = None
-                    if to_amount_api is not None:
+                    if observed_dst and observed_dst.get("amount") is not None:
+                        bridge_amount = float(observed_dst.get("amount") or 0.0)
+                        dst_token_id_resolved = int(observed_dst.get("token_id") or 0)
+                        if observed_dst.get("block_time") is not None:
+                            matched_dst_block_time = int(observed_dst.get("block_time"))
+                    elif to_amount_api is not None:
                         bridge_amount = self._normalize_amount(
                             to_amount_api, dst_chain_norm, new_asset,
                         )
@@ -3598,16 +3699,24 @@ class BaseTracer(ABC):
                         dst_address = late_bridge_info.get("dst_address")
                         if dst_chain_raw and dst_address:
                             dst_chain_norm = self._normalize_chain(dst_chain_raw)
-                            new_asset = (
-                                (late_bridge_info.get("dst_asset") or job.asset or "").upper()
-                                or job.asset
-                            )
-                            asset_changed = bool(
-                                late_bridge_info.get("dst_asset")
-                            ) and new_asset != (job.asset or "").upper()
                             to_amount_api = late_bridge_info.get("to_amount")
                             from_amount_api = late_bridge_info.get("from_amount")
-                            if to_amount_api is not None:
+                            dst_tx_hash = late_bridge_info.get("dst_tx_hash")
+                            observed_dst = await _resolve_bridge_destination_transfer(
+                                dst_chain=dst_chain_norm,
+                                dst_address=dst_address,
+                                dst_tx_hash=dst_tx_hash,
+                            )
+                            observed_asset = (observed_dst or {}).get("asset")
+                            new_asset = (
+                                str(observed_asset).upper()
+                                if observed_asset
+                                else ((late_bridge_info.get("dst_asset") or job.asset or "").upper() or job.asset)
+                            )
+                            asset_changed = new_asset != (job.asset or "").upper()
+                            if observed_dst and observed_dst.get("amount") is not None:
+                                bridge_amount = float(observed_dst.get("amount") or 0.0)
+                            elif to_amount_api is not None:
                                 bridge_amount = self._normalize_amount(
                                     to_amount_api, dst_chain_norm, new_asset,
                                 )
@@ -3627,8 +3736,9 @@ class BaseTracer(ABC):
                                 # via its own outflow walk.
                                 bridge_amount = float(job.incoming_amount or 0.0)
 
-                            dst_tx_hash = late_bridge_info.get("dst_tx_hash")
                             dst_block_time = late_bridge_info.get("dst_block_time")
+                            if observed_dst and observed_dst.get("block_time") is not None:
+                                dst_block_time = int(observed_dst.get("block_time"))
                             synthetic_dst_hash = dst_tx_hash or f"bridge-{uuid.uuid4().hex[:16]}"
 
                             _ensure_entity(
@@ -3670,9 +3780,12 @@ class BaseTracer(ABC):
                                 ),
                             })
 
-                            new_token_id = int(
-                                late_bridge_info.get("dst_token_id") or 0
-                            )
+                            if observed_dst and observed_dst.get("token_id") is not None:
+                                new_token_id = int(observed_dst.get("token_id") or 0)
+                            else:
+                                new_token_id = int(
+                                    late_bridge_info.get("dst_token_id") or 0
+                                )
                             hop_scheduler.push(HopJob(
                                 path_id=job.path_id,
                                 current_address=dst_address,
@@ -4365,30 +4478,61 @@ class BaseTracer(ABC):
                     except Exception:
                         return 0.0
 
-                transfer = max(transfers, key=_amount)
+                tx_hash = arguments.get("tx_hash")
+                chain = arguments.get("blockchain_name")
+                tx_info = all_txs_map.get(tx_hash, {})
+                preferred_path = tx_info.get("path")
+                preferred_path_str = str(preferred_path) if preferred_path is not None else None
+
+                transfer = None
+                if preferred_path_str is not None:
+                    transfer = next(
+                        (tr for tr in transfers if str(tr.get("path")) == preferred_path_str),
+                        None,
+                    )
+                if transfer is None:
+                    transfer = max(transfers, key=_amount)
+
                 input_data = transfer.get("input") or {}
                 output_data = transfer.get("output") or {}
                 from_addr = input_data.get("address") if isinstance(input_data, dict) else None
                 to_addr = output_data.get("address") if isinstance(output_data, dict) else None
 
-                tx_hash = arguments.get("tx_hash")
-                chain = arguments.get("blockchain_name")
-                tx_info = all_txs_map.get(tx_hash, {})
-                token_id = tx_info.get("token_id") or transfer.get("token_id") or 0
-                amount_raw = tx_info.get("amount")
+                transfer_path = transfer.get("path")
+                transfer_path_str = str(transfer_path) if transfer_path is not None else None
+
+                token_id = transfer.get("token_id")
+                if token_id is None:
+                    token_id = tx_info.get("token_id")
+                if token_id is None:
+                    token_id = 0
+
+                use_tx_info = (
+                    preferred_path_str is None
+                    or transfer_path_str is None
+                    or preferred_path_str == transfer_path_str
+                )
+                amount_raw = tx_info.get("amount") if use_tx_info else None
                 if amount_raw is None:
                     amount_raw = transfer.get("amount")
                 if amount_raw is None:
                     amount_raw = transfer.get("amount_coerced")
-                block_time = tx_info.get("block_time") or transfer.get("block_time") or 0
+                block_time = tx_info.get("block_time") if use_tx_info else None
+                if block_time is None:
+                    block_time = transfer.get("block_time") or 0
 
                 is_utxo = chain in self._SATOSHI_CHAINS
                 tx_type = "tx" if is_utxo else "txEth"
-                tx_path = None if is_utxo else "0"
+                tx_path = None if is_utxo else (transfer_path_str or preferred_path_str or "0")
 
-                if tx_hash and tx_hash not in txs_seen:
+                tx_dedupe_key = (
+                    tx_hash,
+                    tx_path if tx_path is not None else "null",
+                    str(token_id),
+                )
+                if tx_hash and tx_dedupe_key not in txs_seen:
                     idx = len(txs_collected)
-                    txs_seen.add(tx_hash)
+                    txs_seen.add(tx_dedupe_key)
                     txs_collected.append({
                         "currency": chain,
                         "descriptor": f"{tx_hash}-{chain}-{token_id}-{idx}",

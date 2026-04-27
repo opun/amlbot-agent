@@ -169,6 +169,28 @@ def _get_descriptor(address: str, chain: str, token_id: int = 0) -> str:
     # Standard address descriptor
     return f"{address}-{chain}-{token_id}"
 
+
+def _parse_address_descriptor(desc: str) -> tuple[str, str, int] | None:
+    """Parse ``address-chain-token_id`` descriptors.
+
+    Address parts may contain dashes (rare but possible in non-EVM chains), so
+    we split from the right and treat the last two segments as chain/token_id.
+    Returns ``None`` when the descriptor doesn't match an address node format.
+    """
+    if not desc or not isinstance(desc, str):
+        return None
+    parts = desc.rsplit("-", 2)
+    if len(parts) != 3:
+        return None
+    addr, chain, token_raw = parts
+    if not addr or not chain:
+        return None
+    try:
+        token_id = int(token_raw)
+    except (TypeError, ValueError):
+        return None
+    return addr, chain, token_id
+
 def _get_timestamp(t: Any) -> int:
     if hasattr(t, 'timestamp'):
         return int(t.timestamp())
@@ -435,6 +457,8 @@ def generate_visualization_payload(
     # edge is self-sufficient and the frontend doesn't need to fall back to
     # a (sometimes failing) hash→txList join to know how much was moved.
     amount_by_hash: dict[str, Any] = {}
+    amount_by_hash_pair: dict[tuple[str, str, str], Any] = {}
+    amount_by_hash_pair_token: dict[tuple[str, str, str, int], Any] = {}
     # Actual on-chain token_id keyed by tx hash, harvested from tx_list/txs.
     # The Step model carries only the *trace-level* asset symbol (e.g. "ETH"
     # for a stolen-ETH case), so a USDT hop downstream still has
@@ -442,6 +466,13 @@ def generate_visualization_payload(
     # lookup returns 0. Feeding the real per-hash token_id into the edge
     # payload lets the frontend render "413.759798 USDT" instead of "NaN".
     token_id_by_hash: dict[str, int] = {}
+    # Preserve per-hash/per-leg path metadata from tx_list so tx nodes can
+    # resolve the same transfer branch the sidebar shows (critical for
+    # multi-transfer same-hash EVM txs; otherwise frontend falls back to
+    # Zero Address when hash/path don't match).
+    tx_path_by_hash: dict[str, str] = {}
+    tx_path_by_hash_pair: dict[tuple[str, str, str], str] = {}
+    tx_path_by_hash_pair_token: dict[tuple[str, str, str, int], str] = {}
     for tx in tx_list_inputs:
         h = tx.get("hash")
         if h:
@@ -455,9 +486,43 @@ def generate_visualization_payload(
                 tid = tx.get("token_id")
             if tid is not None:
                 try:
-                    token_id_by_hash[h] = int(tid)
+                    tid_int = int(tid)
+                    existing_tid = token_id_by_hash.get(h)
+                    # Keep the most-informative token id when both a real tx
+                    # row and a synthetic bridge fallback row share one hash.
+                    # Synthetic rows often carry token_id=0; they must not
+                    # clobber an already-discovered non-native token id.
+                    if existing_tid is None or not (existing_tid != 0 and tid_int == 0):
+                        token_id_by_hash[h] = tid_int
                 except (TypeError, ValueError):
                     pass
+            path_val = tx.get("path")
+            if path_val is not None:
+                path_str = str(path_val)
+                tx_path_by_hash.setdefault(h, path_str)
+                ins = tx.get("inputs") or []
+                outs = tx.get("outputs") or []
+                if ins and outs:
+                    in_addr = ins[0].get("address")
+                    out_addr = outs[0].get("address")
+                    if in_addr and out_addr:
+                        tx_path_by_hash_pair.setdefault((h, in_addr, out_addr), path_str)
+                        if amt is not None:
+                            amount_by_hash_pair.setdefault((h, in_addr, out_addr), amt)
+                        if tid is not None:
+                            try:
+                                tid_int = int(tid)
+                                tx_path_by_hash_pair_token.setdefault(
+                                    (h, in_addr, out_addr, tid_int),
+                                    path_str,
+                                )
+                                if amt is not None:
+                                    amount_by_hash_pair_token.setdefault(
+                                        (h, in_addr, out_addr, tid_int),
+                                        amt,
+                                    )
+                            except (TypeError, ValueError):
+                                pass
         # Backfill display-name fields on entries coming from
         # ``_collect_token_transfer_data`` (they only carry the short
         # chain code). The frontend sidebar reads ``blockchain`` /
@@ -950,7 +1015,27 @@ def generate_visualization_payload(
         _UTXO_CHAINS = {"btc", "bch", "ltc"}
         is_utxo = chain in _UTXO_CHAINS
         tx_type = "tx" if is_utxo else "txEth"
-        tx_path = None if is_utxo else "0"
+        if is_utxo:
+            tx_path = None
+        else:
+            tx_path = None
+            if step.tx_hash:
+                tx_path = tx_path_by_hash_pair_token.get(
+                    (step.tx_hash, step.from_address, step.to_address, int(edge_token_id))
+                )
+                if tx_path is None:
+                    tx_path = tx_path_by_hash_pair.get(
+                        (step.tx_hash, step.from_address, step.to_address)
+                    )
+                if tx_path is None:
+                    tx_path = tx_path_by_hash.get(step.tx_hash)
+            if tx_path is None:
+                tx_path = "0"
+        if step.tx_hash and not is_utxo:
+            # A single account-model tx hash can carry many transfer paths.
+            # Encode path into tx descriptor so each leg gets its own node and
+            # frontend joins tx node <-> txList row deterministically.
+            tx_desc = f"{tx_hash}-{chain}-{edge_token_id}-{tx_path}"
 
         # Track this (from, to) pair for the merged-tx pass below.
         # The first step on a pair locks in the src/tgt descriptors and
@@ -1012,8 +1097,16 @@ def generate_visualization_payload(
                 per_step_amount = None
 
         total_tx_amount: Any = None
-        if step.tx_hash and step.tx_hash in amount_by_hash:
-            total_tx_amount = amount_by_hash[step.tx_hash]
+        if step.tx_hash:
+            total_tx_amount = amount_by_hash_pair_token.get(
+                (step.tx_hash, step.from_address, step.to_address, int(edge_token_id))
+            )
+            if total_tx_amount is None:
+                total_tx_amount = amount_by_hash_pair.get(
+                    (step.tx_hash, step.from_address, step.to_address)
+                )
+            if total_tx_amount is None and step.tx_hash in amount_by_hash:
+                total_tx_amount = amount_by_hash[step.tx_hash]
 
         # Account-model txs (single step per tx_hash) trust amount_by_hash
         # because the API's base-unit representation is canonical. We
@@ -1044,7 +1137,7 @@ def generate_visualization_payload(
         # Use the per-output share (what the edge actually carries).
         edge_amount = tgt_edge_amount
 
-        src_tx_key = (src_desc, step.tx_hash or tx_desc)
+        src_tx_key = (src_desc, tx_desc)
         if src_tx_key not in src_to_tx_seen:
             src_to_tx_seen.add(src_tx_key)
             connects.append({
@@ -1084,13 +1177,13 @@ def generate_visualization_payload(
             "type": "out",
             "hash": step.tx_hash,
             "index": i_step,
-            "path": "0"
+            "path": tx_path
         })
         address_activity[(step.to_address, chain, node_token_id)].append({
              "type": "in",
              "hash": step.tx_hash,
              "index": i_step,
-             "path": "0"
+             "path": tx_path
         })
 
         # Emit a txList entry when the step's tx is not already represented
@@ -1183,6 +1276,44 @@ def generate_visualization_payload(
             "y": 0,
             "type": "mergedTx",
         })
+
+    # --- Intra-address token-lane connectors ---
+    # The same address can appear on multiple token lanes on one chain
+    # (e.g. ``0xabc-eth-0`` and ``0xabc-eth-94252``). Without an explicit
+    # connector, the graph can look like two unrelated components although it is
+    # literally one address. Link those descriptors with a subtle dashed edge.
+    addr_chain_to_descs: dict[tuple[str, str], list[tuple[int, str]]] = defaultdict(list)
+    for desc in added_descriptors:
+        parsed = _parse_address_descriptor(desc)
+        if not parsed:
+            continue
+        addr, desc_chain, desc_token = parsed
+        addr_chain_to_descs[(addr, desc_chain)].append((desc_token, desc))
+
+    alias_edge_seen: set[tuple[str, str]] = set()
+    for (_addr, _chain), token_descs in addr_chain_to_descs.items():
+        if len(token_descs) < 2:
+            continue
+        token_descs.sort(key=lambda t: t[0])
+        for i in range(1, len(token_descs)):
+            src_d = token_descs[i - 1][1]
+            tgt_d = token_descs[i][1]
+            key = (src_d, tgt_d)
+            if key in alias_edge_seen:
+                continue
+            alias_edge_seen.add(key)
+            connects.append({
+                "source": src_d,
+                "target": tgt_d,
+                "data": {
+                    "color": "#9AA3B2",
+                    "type": "dashed",
+                    "isNew": True,
+                    "isNeedReverse": False,
+                    "hovered": False,
+                    "label": "Same address",
+                },
+            })
 
     # --- Cross-chain bridge handoff connectors ---
     # For each ``bridge_transfer`` step, the tracer emits the step on the

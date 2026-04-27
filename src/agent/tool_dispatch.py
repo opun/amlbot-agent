@@ -112,20 +112,16 @@ async def _call_get_extra_address_info(client: Any, args: dict[str, Any]) -> Any
     )
 
 
-# bridge-detector API (https://api.bridge-detector.amlbot.com/docs) expects
-# full chain names like "tron" / "ethereum" / "binance-smart-chain", while the
-# rest of our codebase normalizes to SAILS short codes ("trx", "eth", "bsc").
-# Translate here — the stdio MCP server and the HTTP proxy both forward the
-# ``chain`` argument verbatim, so the short code hits the bridge backend and
-# is rejected with a 500. Mapping is narrow on purpose: only chains the
-# bridge-detector actually serves.
+# Source of truth for accepted chain slugs:
+# https://api.bridge-detector.amlbot.com/v1/bridge/chains
+# Keep values aligned with that catalog to avoid ``unsupported_chain`` 400s.
 _BRIDGE_CHAIN_MAP: dict[str, str] = {
     # Tron is exposed to bridge-detector as ``tron-mainnet`` (the
     # service's network identifier); plain ``"tron"`` is rejected.
     "trx": "tron-mainnet",
     "eth": "ethereum",
-    "bsc": "binance-smart-chain",
-    "bnb": "binance-smart-chain",
+    "bsc": "bsc",
+    "bnb": "bsc",
     "matic": "polygon",
     "arb": "arbitrum",
     "op": "optimism",

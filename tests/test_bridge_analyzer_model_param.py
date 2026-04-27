@@ -70,7 +70,7 @@ def test_stdio_bridge_analyzer_alias_threads_model_through():
     ))
     _, arguments = call_tool.await_args.args
     assert arguments["model"] == "bridge-analyzer-1"
-    assert arguments["chain"] == "binance-smart-chain"
+    assert arguments["chain"] == "bsc"
 
 
 # ── HTTP MCPHTTPClient ───────────────────────────────────────────────────

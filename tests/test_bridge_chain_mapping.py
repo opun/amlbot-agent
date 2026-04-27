@@ -29,9 +29,10 @@ class TestBridgeChainMap:
     def test_eth_is_translated_to_ethereum(self):
         assert _bridge_chain("eth") == "ethereum"
 
-    def test_bsc_is_translated_to_binance_smart_chain(self):
-        assert _bridge_chain("bsc") == "binance-smart-chain"
-        assert _bridge_chain("bnb") == "binance-smart-chain"
+    def test_bsc_keeps_canonical_bsc_slug(self):
+        # Bridge-detector exposes BSC as ``bsc`` in /v1/bridge/chains.
+        assert _bridge_chain("bsc") == "bsc"
+        assert _bridge_chain("bnb") == "bsc"
 
     def test_matic_is_translated_to_polygon(self):
         assert _bridge_chain("matic") == "polygon"

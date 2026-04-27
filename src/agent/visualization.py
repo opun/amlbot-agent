@@ -1137,7 +1137,12 @@ def generate_visualization_payload(
         # Use the per-output share (what the edge actually carries).
         edge_amount = tgt_edge_amount
 
-        src_tx_key = (src_desc, tx_desc)
+        # UTXO multi-output txs intentionally fan out into multiple ``tx_desc``
+        # values (…-0, …-1, …-2) so each output branch has its own tx→tgt edge.
+        # But the input side must stay singular: one on-chain tx has one input
+        # edge from the source address. Dedup by tx_hash for UTXO and by
+        # descriptor elsewhere.
+        src_tx_key = (src_desc, step.tx_hash if (is_utxo and step.tx_hash) else tx_desc)
         if src_tx_key not in src_to_tx_seen:
             src_to_tx_seen.add(src_tx_key)
             connects.append({
